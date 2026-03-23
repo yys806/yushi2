@@ -1,0 +1,15 @@
+{
+  "server": {
+    "port": 8080,
+    "jwtSecret": "PLEASE_REPLACE"
+  },
+  "database": {
+    "url": "postgresql://user:password@127.0.0.1:5432/shenyu"
+  },
+  "siliconflow": {
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "apiKey": "sk-uwatcboyayoqqvkqhnunlimfnbaqivsfkijznlghkbawxben",
+    "textModel": "Pro/MiniMaxAI/MiniMax-M2.5",
+    "imageModel": "Qwen/Qwen-Image"
+  }
+}
