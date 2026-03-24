@@ -5,6 +5,7 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
@@ -50,12 +51,13 @@ model Favorite {
   work      Work     @relation(fields: [workId], references: [id], onDelete: Cascade)
 
   @@unique([userId, workId])
+  @@index([userId, createdAt])
 }
 
 model Order {
   id                String   @id @default(uuid())
   userId            String
-  packageType       String
+  packageId         String?
   amount            Float
   times             Int
   payChannel        String
@@ -64,6 +66,19 @@ model Order {
   createdAt         DateTime @default(now())
   paidAt            DateTime?
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rechargePackage   RechargePackage? @relation(fields: [packageId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
+  @@index([packageId])
+}
+
+model RechargePackage {
+  id        String   @id
+  name      String
+  amount    Float
+  times     Int
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  orders    Order[]
 }

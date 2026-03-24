@@ -8,6 +8,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+dev.log
 
 # Env files
 .env
@@ -28,3 +29,7 @@ android/.idea/
 
 # VSCode
 .vscode/
+
+# Netlify local metadata
+.netlify/
+.netlify_site_name_tmp
