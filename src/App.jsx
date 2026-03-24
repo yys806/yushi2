@@ -15,10 +15,24 @@ const options = {
   material: ["翡翠", "和田玉", "岫玉", "独山玉", "绿松石", "寿山石", "欧珀"],
   pattern: ["龙纹", "饕餮纹", "云纹", "鸟纹", "鱼纹", "绳纹", "蝉纹", "云雷纹", "蟠螭纹", "缠枝纹"],
   form: ["吊坠", "手镯", "戒指", "摆件", "印章"],
-  color: ["破空蓝", "中国红", "远山青", "王者金", "霸道紫"],
 };
 
 const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+const ADMIN_TOKEN_STORAGE_KEY = "shenyu_admin_token";
+
+function parseJsonSafe(raw) {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function isAuthFailure(message) {
+  const msg = String(message || "").toLowerCase();
+  return msg.includes("401") || msg.includes("403") || msg.includes("unauthorized") || msg.includes("forbidden") || msg.includes("登录");
+}
 
 function formatBudget(v) {
   return v >= 10000 ? "¥10000+" : `¥${v}`;
@@ -39,7 +53,8 @@ function mapWork(item) {
     detailInspo: item.inspiration,
     detailMeaning: item.meaning,
     image: item.image_url || item.imageUrl || jadeImages[0],
-    grade: item.grade || "A 级",
+    grade: item.grade || "评级中...",
+    gradeReason: item.grade_reason || item.gradeReason || "",
   };
 }
 
@@ -132,11 +147,12 @@ function AuthPage({ loading, error, mode, form, onChange, onMode, onSubmit }) {
   );
 }
 
-function Tabbar({ page, onNav }) {
+function Tabbar({ page, onNav, unreadCount }) {
   const tabs = [
     { key: "home", label: "首页" },
     { key: "custom", label: "定制" },
     { key: "product", label: "成品" },
+    { key: "museum", label: "玉苑" },
     { key: "profile", label: "我的" },
   ];
 
@@ -151,6 +167,7 @@ function Tabbar({ page, onNav }) {
             onClick={() => onNav(tab.key)}
           >
             {tab.label}
+            {tab.key === "profile" && unreadCount > 0 ? <span className="tab-badge">{unreadCount > 99 ? "99+" : unreadCount}</span> : null}
           </button>
         ))}
       </div>
@@ -178,11 +195,15 @@ export default function App() {
   const [currentWork, setCurrentWork] = useState(null);
   const [applications, setApplications] = useState([]);
   const [notices, setNotices] = useState([]);
+  const [messageReads, setMessageReads] = useState([]);
+  const [activeMessage, setActiveMessage] = useState(null);
+  const [museumItems, setMuseumItems] = useState([]);
+  const [selectedMuseumId, setSelectedMuseumId] = useState("");
 
   const [loadingAuth, setLoadingAuth] = useState(false);
   const [loadingGenerate, setLoadingGenerate] = useState(false);
   const [generatePhase, setGeneratePhase] = useState("idle");
-  const [generateProgress, setGenerateProgress] = useState({ plan: 0, image: 0 });
+  const [generateProgress, setGenerateProgress] = useState({ plan: 0, image: 0, rating: 0 });
   const [loadingData, setLoadingData] = useState(false);
   const [loadingAdmin, setLoadingAdmin] = useState(false);
   const [error, setError] = useState("");
@@ -190,20 +211,31 @@ export default function App() {
   const [applyTimes, setApplyTimes] = useState(100);
   const [applyCustomTimes, setApplyCustomTimes] = useState("");
   const [applyMessage, setApplyMessage] = useState("");
-  const [adminPayload, setAdminPayload] = useState({ users: [], applications: [], notices: [] });
+  const [applyDialogOpen, setApplyDialogOpen] = useState(false);
+  const [applyForm, setApplyForm] = useState({ applicantName: "", reason: "" });
+  const [adminPayload, setAdminPayload] = useState({ users: [], applications: [], notices: [], museumItems: [] });
   const [reviewNote, setReviewNote] = useState("");
-  const [noticeDraft, setNoticeDraft] = useState({ title: "", content: "" });
+  const [noticeDraft, setNoticeDraft] = useState({ title: "", content: "", kind: "normal", targetUserId: "" });
   const [adminForm, setAdminForm] = useState({ email: "", password: "" });
-  const [adminToken, setAdminToken] = useState("");
+  const [adminToken, setAdminToken] = useState(() => {
+    if (typeof window === "undefined") return "";
+    if (!pathname.startsWith("/admin")) return "";
+    return window.localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || "";
+  });
   const [adminMenu, setAdminMenu] = useState("approvals");
   const [adminLoginLoading, setAdminLoginLoading] = useState(false);
+  const [adminActionLoading, setAdminActionLoading] = useState(false);
   const [adminError, setAdminError] = useState("");
+  const [applyLoading, setApplyLoading] = useState(false);
+  const [noticeRefreshing, setNoticeRefreshing] = useState(false);
+  const [museumRefreshing, setMuseumRefreshing] = useState(false);
+  const [museumForm, setMuseumForm] = useState({ category: "natural", title: "", description: "" });
+  const [museumFile, setMuseumFile] = useState(null);
 
   const [custom, setCustom] = useState({
     material: "翡翠",
     pattern: "龙纹",
     form: "吊坠",
-    color: "破空蓝",
     budget: 3000,
     recipient: "送给妈妈",
     customInput: "",
@@ -280,7 +312,7 @@ export default function App() {
     });
 
     const raw = await resp.text();
-    const parsed = raw ? JSON.parse(raw) : {};
+    const parsed = parseJsonSafe(raw);
     if (!resp.ok) throw new Error(parsed?.message || `请求失败(${resp.status})`);
     return parsed;
   }, [adminToken]);
@@ -301,7 +333,7 @@ export default function App() {
         body: JSON.stringify({ email, password }),
       });
       const raw = await resp.text();
-      const parsed = raw ? JSON.parse(raw) : {};
+      const parsed = parseJsonSafe(raw);
       if (!resp.ok || !parsed?.access_token) {
         throw new Error(parsed?.msg || parsed?.error_description || "管理员登录失败");
       }
@@ -317,7 +349,7 @@ export default function App() {
         body: JSON.stringify({}),
       });
       const dashRaw = await dashResp.text();
-      const dashData = dashRaw ? JSON.parse(dashRaw) : {};
+      const dashData = parseJsonSafe(dashRaw);
       if (!dashResp.ok) {
         throw new Error(dashData?.message || "你不是管理员或后台不可用");
       }
@@ -327,6 +359,7 @@ export default function App() {
         users: dashData?.users || [],
         applications: dashData?.applications || [],
         notices: dashData?.notices || [],
+        museumItems: dashData?.museumItems || [],
       });
       setAdminForm((prev) => ({ ...prev, password: "" }));
       showIsland("管理员登录成功");
@@ -339,9 +372,11 @@ export default function App() {
 
   const handleAdminLogout = () => {
     setAdminToken("");
-    setAdminPayload({ users: [], applications: [], notices: [] });
+    setAdminPayload({ users: [], applications: [], notices: [], museumItems: [] });
     setReviewNote("");
-    setNoticeDraft({ title: "", content: "" });
+    setNoticeDraft({ title: "", content: "", kind: "normal", targetUserId: "" });
+    setMuseumForm({ category: "natural", title: "", description: "" });
+    setMuseumFile(null);
     setAdminForm((prev) => ({ ...prev, password: "" }));
   };
 
@@ -369,44 +404,59 @@ export default function App() {
         isAdmin: Boolean(profileRow?.is_admin),
       });
 
-      const { data: works, error: worksErr } = await supabase
-        .from("works")
-        .select("*")
-        .eq("user_id", u.id)
-        .order("created_at", { ascending: false });
-      if (worksErr) throw worksErr;
+      const [worksRes, favRes, appRes, noticeRes, readRes, museumRes] = await Promise.all([
+        supabase
+          .from("works")
+          .select("*")
+          .eq("user_id", u.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("favorites")
+          .select("work_id, works(*)")
+          .eq("user_id", u.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("quota_applications")
+          .select("id,applicant_name,apply_reason,requested_times,status,review_note,created_at,reviewed_at")
+          .eq("user_id", u.id)
+          .order("created_at", { ascending: false })
+          .limit(20),
+        supabase
+          .from("notices")
+          .select("id,title,content,kind,target_user_id,created_at")
+          .eq("active", true)
+          .or(`target_user_id.is.null,target_user_id.eq.${u.id}`)
+          .order("created_at", { ascending: false })
+          .limit(10),
+        supabase
+          .from("message_reads")
+          .select("message_type,message_id,read_at")
+          .eq("user_id", u.id),
+        supabase
+          .from("museum_items")
+          .select("id,category,title,description,image_url,created_at")
+          .eq("active", true)
+          .order("created_at", { ascending: false })
+          .limit(100),
+      ]);
 
-      const mappedHistory = (works || []).map(mapWork);
+      if (worksRes.error) throw worksRes.error;
+      if (favRes.error) throw favRes.error;
+      if (appRes.error) throw appRes.error;
+      if (noticeRes.error) throw noticeRes.error;
+      if (readRes.error && readRes.error.code !== "42P01") throw readRes.error;
+      if (museumRes.error && museumRes.error.code !== "42P01") throw museumRes.error;
+
+      const mappedHistory = (worksRes.data || []).map(mapWork);
       setHistory(mappedHistory);
 
-      const { data: favRows, error: favErr } = await supabase
-        .from("favorites")
-        .select("work_id, works(*)")
-        .eq("user_id", u.id)
-        .order("created_at", { ascending: false });
-      if (favErr) throw favErr;
-
-      const mappedFav = (favRows || []).map((row) => mapWork(row.works));
+      const mappedFav = (favRes.data || []).map((row) => mapWork(row.works));
       setFavorites(mappedFav);
 
-      const { data: appRows, error: appErr } = await supabase
-        .from("quota_applications")
-        .select("id,requested_times,status,review_note,created_at,reviewed_at")
-        .eq("user_id", u.id)
-        .order("created_at", { ascending: false })
-        .limit(20);
-      if (appErr) throw appErr;
-
-      const { data: noticeRows, error: noticeErr } = await supabase
-        .from("notices")
-        .select("id,title,content,created_at")
-        .eq("active", true)
-        .order("created_at", { ascending: false })
-        .limit(10);
-      if (noticeErr) throw noticeErr;
-
-      setApplications(appRows || []);
-      setNotices(noticeRows || []);
+      setApplications(appRes.data || []);
+      setNotices(noticeRes.data || []);
+      setMessageReads(readRes.error ? [] : readRes.data || []);
+      setMuseumItems(museumRes.error ? [] : museumRes.data || []);
       if (mappedHistory.length && !currentWork) setCurrentWork(mappedHistory[0]);
     } catch (e) {
       setError(e?.message || "加载失败");
@@ -414,6 +464,15 @@ export default function App() {
       setLoadingData(false);
     }
   }, [currentWork]);
+
+  useEffect(() => {
+    if (!isAdminRoute || typeof window === "undefined") return;
+    if (adminToken) {
+      window.localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, adminToken);
+      return;
+    }
+    window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+  }, [isAdminRoute, adminToken]);
 
   useEffect(() => {
     return () => {
@@ -447,7 +506,11 @@ export default function App() {
         setFavorites([]);
         setApplications([]);
         setNotices([]);
-        setAdminPayload({ users: [], applications: [], notices: [] });
+        setMessageReads([]);
+        setActiveMessage(null);
+        setMuseumItems([]);
+        setSelectedMuseumId("");
+        setAdminPayload({ users: [], applications: [], notices: [], museumItems: [] });
         setCurrentWork(null);
         setPage("home");
         setStack([]);
@@ -525,7 +588,7 @@ export default function App() {
   };
 
   const handleGenerate = async () => {
-    if (!session?.access_token) return;
+    if (!session?.access_token || loadingGenerate) return;
     const recipient = custom.recipient.trim();
     if (recipient.length < 2) {
       setError("请填写送给的对象（至少 2 个字）");
@@ -534,7 +597,7 @@ export default function App() {
 
     setLoadingGenerate(true);
     setGeneratePhase("plan");
-    setGenerateProgress({ plan: 0, image: 0 });
+    setGenerateProgress({ plan: 0, image: 0, rating: 0 });
     setError("");
     if (page !== "product") navTo("product");
     try {
@@ -545,7 +608,7 @@ export default function App() {
           productType: custom.form,
           budget: custom.budget,
           subject: `送给${recipient}的专属祝福`,
-          styleHint: custom.color,
+          styleHint: "",
           customInput: custom.customInput,
         },
       });
@@ -560,9 +623,24 @@ export default function App() {
       if (invokeError) throw invokeError;
 
       await animateProgressBar("image", 100, 2, 70);
-      showIsland("设计已全部完成");
+      showIsland("设计图已完成");
 
       const mapped = mapWork(data?.work ?? data);
+      setGeneratePhase("rating");
+      const ratingCapPromise = animateProgressBar("rating", 90, 1, 110);
+      const ratingResp = await supabase.functions.invoke("rate-work", {
+        body: { workId: mapped.id },
+      });
+      await ratingCapPromise;
+
+      if (!ratingResp.error && ratingResp.data?.grade) {
+        mapped.grade = ratingResp.data.grade;
+        mapped.gradeReason = ratingResp.data.reason || "";
+      }
+
+      await animateProgressBar("rating", 100, 2, 65);
+      showIsland("AI评级已完成");
+
       setCurrentWork(mapped);
       setHistory((h) => [mapped, ...h]);
       await loadUserData(user);
@@ -572,7 +650,7 @@ export default function App() {
       window.setTimeout(() => {
         setLoadingGenerate(false);
         setGeneratePhase("idle");
-        setGenerateProgress({ plan: 0, image: 0 });
+        setGenerateProgress({ plan: 0, image: 0, rating: 0 });
       }, 320);
     }
   };
@@ -711,23 +789,36 @@ export default function App() {
   const handleApplyQuota = async () => {
     if (!user) return;
     const times = Number(applyTimes);
+    const applicantName = applyForm.applicantName.trim();
+    const applyReason = applyForm.reason.trim();
     if (!Number.isInteger(times) || times <= 0 || times > 10000) {
       setError("申请额度需为 1~10000 的整数");
       return;
     }
+    if (applicantName.length < 2) {
+      setError("申请人名称至少 2 个字");
+      return;
+    }
     setError("");
+    setApplyLoading(true);
     try {
       const { error: insertErr } = await supabase.from("quota_applications").insert({
         user_id: user.id,
+        applicant_name: applicantName,
+        apply_reason: applyReason || null,
         requested_times: times,
         status: "pending",
       });
       if (insertErr) throw insertErr;
       setApplyMessage("申请已提交，请等待管理员审批");
+      setApplyDialogOpen(false);
+      setApplyForm({ applicantName: "", reason: "" });
       showIsland("申请提交成功");
       await loadUserData(user);
     } catch (e) {
       setError(e?.message || "申请提交失败");
+    } finally {
+      setApplyLoading(false);
     }
   };
 
@@ -741,13 +832,97 @@ export default function App() {
         users: data?.users || [],
         applications: data?.applications || [],
         notices: data?.notices || [],
+        museumItems: data?.museumItems || [],
       });
     } catch (e) {
-      setAdminError(e?.message || "后台数据加载失败");
+      const message = e?.message || "后台数据加载失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
     } finally {
       setLoadingAdmin(false);
     }
   }, [adminInvoke, adminToken]);
+
+  const refreshNoticesAndApplications = useCallback(async () => {
+    if (!user) return;
+    setNoticeRefreshing(true);
+    setError("");
+    try {
+      const [profileRes, appRes, noticeRes, readRes] = await Promise.all([
+        supabase
+          .from("user_profiles")
+          .select("id,email,nickname,quota_total,quota_used,is_admin")
+          .eq("id", user.id)
+          .maybeSingle(),
+        supabase
+          .from("quota_applications")
+          .select("id,applicant_name,apply_reason,requested_times,status,review_note,created_at,reviewed_at")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false })
+          .limit(20),
+        supabase
+          .from("notices")
+          .select("id,title,content,kind,target_user_id,created_at")
+          .eq("active", true)
+          .or(`target_user_id.is.null,target_user_id.eq.${user.id}`)
+          .order("created_at", { ascending: false })
+          .limit(10),
+        supabase
+          .from("message_reads")
+          .select("message_type,message_id,read_at")
+          .eq("user_id", user.id),
+      ]);
+
+      if (profileRes.error) throw profileRes.error;
+      if (appRes.error) throw appRes.error;
+      if (noticeRes.error) throw noticeRes.error;
+      if (readRes.error && readRes.error.code !== "42P01") throw readRes.error;
+
+      const profileRow = profileRes.data;
+      if (profileRow) {
+        setProfile({
+          id: profileRow.id,
+          email: profileRow.email || user.email || "",
+          nickname: profileRow.nickname || user.user_metadata?.nickname || "用户",
+          quotaTotal: profileRow.quota_total ?? 5,
+          quotaUsed: profileRow.quota_used ?? 0,
+          quotaRemaining: profileRow.is_admin ? -1 : Math.max(0, (profileRow.quota_total ?? 5) - (profileRow.quota_used ?? 0)),
+          isAdmin: Boolean(profileRow.is_admin),
+        });
+      }
+
+      setApplications(appRes.data || []);
+      setNotices(noticeRes.data || []);
+      setMessageReads(readRes.error ? [] : readRes.data || []);
+      showIsland("消息已刷新");
+    } catch (e) {
+      setError(e?.message || "消息刷新失败");
+    } finally {
+      setNoticeRefreshing(false);
+    }
+  }, [user, showIsland]);
+
+  const refreshMuseum = useCallback(async () => {
+    setMuseumRefreshing(true);
+    setError("");
+    try {
+      const { data, error: museumErr } = await supabase
+        .from("museum_items")
+        .select("id,category,title,description,image_url,created_at")
+        .eq("active", true)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (museumErr && museumErr.code !== "42P01") throw museumErr;
+      setMuseumItems(museumErr ? [] : data || []);
+      showIsland("玉苑已刷新");
+    } catch (e) {
+      setError(e?.message || "玉苑刷新失败");
+    } finally {
+      setMuseumRefreshing(false);
+    }
+  }, [showIsland]);
 
   useEffect(() => {
     if (!isAdminRoute || !adminToken) return;
@@ -756,6 +931,7 @@ export default function App() {
 
   const handleReviewApplication = async (applicationId, decision) => {
     setAdminError("");
+    setAdminActionLoading(true);
     try {
       await adminInvoke("review-application", {
         applicationId,
@@ -764,59 +940,234 @@ export default function App() {
       });
       setReviewNote("");
       showIsland(decision === "approved" ? "审批已通过" : "审批已驳回");
-      await loadAdminDashboard();
-      await loadUserData(user);
+      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
     } catch (e) {
-      setAdminError(e?.message || "审批失败");
+      const message = e?.message || "审批失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
     }
   };
 
   const handlePublishNotice = async () => {
     setAdminError("");
+    setAdminActionLoading(true);
     try {
       await adminInvoke("publish-notice", {
         title: noticeDraft.title,
         content: noticeDraft.content,
+        kind: noticeDraft.kind,
+        targetUserId: noticeDraft.targetUserId || null,
         active: true,
       });
-      setNoticeDraft({ title: "", content: "" });
+      setNoticeDraft({ title: "", content: "", kind: "normal", targetUserId: "" });
       showIsland("通知已发布");
-      await loadAdminDashboard();
-      await loadUserData(user);
+      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
     } catch (e) {
-      setAdminError(e?.message || "通知发布失败");
+      const message = e?.message || "通知发布失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
+  const handlePublishMuseumItem = async () => {
+    if (!museumFile || !museumForm.title.trim() || !museumForm.description.trim()) {
+      setAdminError("发布前必须填写图片、标题、说明");
+      return;
+    }
+
+    setAdminError("");
+    setAdminActionLoading(true);
+    try {
+      const fileName = museumFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const objectPath = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${fileName}`;
+      const uploadResp = await fetch(`${supabaseUrl}/storage/v1/object/museum-assets/${objectPath}`, {
+        method: "POST",
+        headers: {
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${adminToken}`,
+          "x-upsert": "false",
+          "Content-Type": museumFile.type || "application/octet-stream",
+        },
+        body: museumFile,
+      });
+
+      const uploadRaw = await uploadResp.text();
+      const uploadParsed = parseJsonSafe(uploadRaw);
+      if (!uploadResp.ok) {
+        throw new Error(uploadParsed?.message || uploadParsed?.error || `图片上传失败(${uploadResp.status})`);
+      }
+
+      const imageUrl = `${supabaseUrl}/storage/v1/object/public/museum-assets/${objectPath}`;
+      await adminInvoke("publish-museum-item", {
+        category: museumForm.category,
+        title: museumForm.title.trim(),
+        description: museumForm.description.trim(),
+        imageUrl,
+        active: true,
+      });
+
+      setMuseumForm({ category: "natural", title: "", description: "" });
+      setMuseumFile(null);
+      showIsland("玉苑内容已发布");
+      await Promise.all([loadAdminDashboard(), refreshMuseum()]);
+    } catch (e) {
+      const message = e?.message || "玉苑发布失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
     }
   };
 
   const handleAdminDeleteUser = async (targetUserId) => {
     if (!window.confirm("确定删除该用户吗？删除后不可恢复。")) return;
     setAdminError("");
+    setAdminActionLoading(true);
     try {
       await adminInvoke("admin-delete-user", { targetUserId });
       showIsland("用户已删除");
       await loadAdminDashboard();
     } catch (e) {
-      setAdminError(e?.message || "删除用户失败");
+      const message = e?.message || "删除用户失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
     }
   };
 
   const handleAdminDeleteNotice = async (noticeId) => {
     if (!window.confirm("确定删除这条公告吗？")) return;
     setAdminError("");
+    setAdminActionLoading(true);
     try {
       await adminInvoke("admin-delete-notice", { noticeId });
       showIsland("公告已删除");
-      await loadAdminDashboard();
-      await loadUserData(user);
+      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
     } catch (e) {
-      setAdminError(e?.message || "删除公告失败");
+      const message = e?.message || "删除公告失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
+  const handleAdminEditNotice = async (notice) => {
+    const title = window.prompt("编辑公告标题", notice.title || "");
+    if (title === null) return;
+    const content = window.prompt("编辑公告内容", notice.content || "");
+    if (content === null) return;
+    const titleTrimmed = title.trim();
+    const contentTrimmed = content.trim();
+    const kindInput = window.prompt("通知类型（announcement=公告橙色，normal=普通白色）", notice.kind || "normal");
+    if (kindInput === null) return;
+    const targetUserInput = window.prompt("目标用户ID（留空表示全体用户）", notice.target_user_id || "");
+    if (targetUserInput === null) return;
+    const kind = kindInput.trim() === "announcement" ? "announcement" : "normal";
+    const targetUserId = targetUserInput.trim() || null;
+    if (!titleTrimmed || !contentTrimmed) {
+      setAdminError("标题和内容不能为空");
+      return;
+    }
+
+    setAdminError("");
+    setAdminActionLoading(true);
+    try {
+      await adminInvoke("update-notice", {
+        noticeId: notice.id,
+        title: titleTrimmed,
+        content: contentTrimmed,
+        kind,
+        targetUserId,
+      });
+      showIsland("公告已更新");
+      await Promise.all([loadAdminDashboard(), user ? refreshNoticesAndApplications() : Promise.resolve()]);
+    } catch (e) {
+      const message = e?.message || "更新公告失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
+  const handleAdminEditMuseumItem = async (item) => {
+    const categoryInput = window.prompt("编辑分类（natural=自然玉石，carving=玉雕作品）", item.category || "natural");
+    if (categoryInput === null) return;
+    const title = window.prompt("编辑玉苑标题", item.title || "");
+    if (title === null) return;
+    const description = window.prompt("编辑玉苑说明", item.description || "");
+    if (description === null) return;
+    const category = categoryInput.trim() === "carving" ? "carving" : "natural";
+    const titleTrimmed = title.trim();
+    const descriptionTrimmed = description.trim();
+    if (!titleTrimmed || !descriptionTrimmed) {
+      setAdminError("标题和说明不能为空");
+      return;
+    }
+
+    setAdminError("");
+    setAdminActionLoading(true);
+    try {
+      await adminInvoke("update-museum-item", {
+        itemId: item.id,
+        category,
+        title: titleTrimmed,
+        description: descriptionTrimmed,
+      });
+      showIsland("玉苑内容已更新");
+      await Promise.all([loadAdminDashboard(), refreshMuseum()]);
+    } catch (e) {
+      const message = e?.message || "更新玉苑内容失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
+  const handleAdminDeleteMuseumItem = async (itemId) => {
+    if (!window.confirm("确定删除这条玉苑内容吗？")) return;
+    setAdminError("");
+    setAdminActionLoading(true);
+    try {
+      await adminInvoke("admin-delete-museum-item", { itemId });
+      showIsland("玉苑内容已删除");
+      await Promise.all([loadAdminDashboard(), refreshMuseum()]);
+    } catch (e) {
+      const message = e?.message || "删除玉苑内容失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
     }
   };
 
   const handlePay = async () => {
     setError("");
     setApplyMessage("");
-    await handleApplyQuota();
+    setApplyDialogOpen(true);
   };
 
   const quotaText = useMemo(() => {
@@ -824,6 +1175,138 @@ export default function App() {
     if (profile.isAdmin) return "管理员账号：无限额度";
     return `免费总计 ${profile.quotaTotal} 次（剩余 ${profile.quotaRemaining} 次）`;
   }, [profile]);
+
+  const quotaProgress = useMemo(() => {
+    if (!profile) {
+      return { percent: 100, primary: "5 / 5 次", secondary: "剩余额度 5 次" };
+    }
+    if (profile.isAdmin) {
+      return { percent: 100, primary: "无限额度", secondary: "管理员账号" };
+    }
+    const total = Math.max(1, Number(profile.quotaTotal) || 0);
+    const remaining = Math.max(0, Number(profile.quotaRemaining) || 0);
+    const used = Math.max(0, Number(profile.quotaUsed) || 0);
+    const percent = Math.max(0, Math.min(100, Math.round((remaining / total) * 100)));
+    return {
+      percent,
+      primary: `${remaining} / ${total} 次`,
+      secondary: `已使用 ${used} 次`,
+    };
+  }, [profile]);
+
+  const messageReadMap = useMemo(() => {
+    const map = new Map();
+    (messageReads || []).forEach((row) => {
+      const key = `${row.message_type}:${row.message_id}`;
+      map.set(key, row.read_at || "");
+    });
+    return map;
+  }, [messageReads]);
+
+  const messageItems = useMemo(() => {
+    const noticeItems = (notices || []).map((n) => {
+      const key = `notice:${n.id}`;
+      const readAt = messageReadMap.get(key);
+      return {
+        key,
+        messageType: "notice",
+        messageId: n.id,
+        title: n.title,
+        content: n.content,
+        createdAt: n.created_at,
+        kind: n.kind === "announcement" ? "announcement" : "normal",
+        isRead: Boolean(readAt),
+        readAt,
+      };
+    });
+
+    const appItems = (applications || []).map((a) => {
+      const key = `application:${a.id}`;
+      const readAt = messageReadMap.get(key);
+      const statusText = a.status === "pending" ? "待审批" : a.status === "approved" ? "已批准" : "已驳回";
+      const content = `你的额度申请 ${a.requested_times} 次，当前状态：${statusText}${a.review_note ? `（${a.review_note}）` : ""}`;
+      return {
+        key,
+        messageType: "application",
+        messageId: a.id,
+        title: `额度申请通知 · ${a.requested_times} 次`,
+        content,
+        createdAt: a.reviewed_at || a.created_at,
+        kind: "normal",
+        isRead: Boolean(readAt),
+        readAt,
+      };
+    });
+
+    return [...noticeItems, ...appItems].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  }, [notices, applications, messageReadMap]);
+
+  const unreadCount = useMemo(() => messageItems.filter((m) => !m.isRead).length, [messageItems]);
+
+  const markMessageAsRead = useCallback(async (item) => {
+    if (!user || !item || item.isRead) return;
+    try {
+      const { error: upsertErr } = await supabase.from("message_reads").upsert(
+        {
+          user_id: user.id,
+          message_type: item.messageType,
+          message_id: item.messageId,
+          read_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id,message_type,message_id" }
+      );
+      if (upsertErr && upsertErr.code !== "42P01") throw upsertErr;
+      setMessageReads((prev) => {
+        const exists = prev.some((r) => r.message_type === item.messageType && r.message_id === item.messageId);
+        if (exists) {
+          return prev.map((r) =>
+            r.message_type === item.messageType && r.message_id === item.messageId
+              ? { ...r, read_at: new Date().toISOString() }
+              : r
+          );
+        }
+        return [...prev, { message_type: item.messageType, message_id: item.messageId, read_at: new Date().toISOString() }];
+      });
+    } catch (e) {
+      setError(e?.message || "标记已读失败");
+    }
+  }, [user]);
+
+  const handleOpenMessage = async (item) => {
+    setActiveMessage(item);
+    await markMessageAsRead(item);
+  };
+
+  const handleMarkAllRead = async () => {
+    if (!user) return;
+    const unreadItems = messageItems.filter((m) => !m.isRead);
+    if (!unreadItems.length) {
+      showIsland("没有未读消息");
+      return;
+    }
+
+    setNoticeRefreshing(true);
+    setError("");
+    try {
+      const payload = unreadItems.map((item) => ({
+        user_id: user.id,
+        message_type: item.messageType,
+        message_id: item.messageId,
+        read_at: new Date().toISOString(),
+      }));
+
+      const { error: upsertErr } = await supabase.from("message_reads").upsert(payload, {
+        onConflict: "user_id,message_type,message_id",
+      });
+      if (upsertErr && upsertErr.code !== "42P01") throw upsertErr;
+      await refreshNoticesAndApplications();
+      showIsland("已全部标记为已读");
+    } catch (e) {
+      setError(e?.message || "一键已读失败");
+    } finally {
+      setNoticeRefreshing(false);
+    }
+  };
 
   if (!isAdminRoute && !user) {
     return (
@@ -918,16 +1401,6 @@ export default function App() {
             ))}
           </select>
         </label>
-        <label className="row-field">
-          色系/风格
-          <select value={custom.color} onChange={(e) => setCustom((c) => ({ ...c, color: e.target.value }))}>
-            {options.color.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </select>
-        </label>
       </section>
 
       <section className="card">
@@ -990,6 +1463,12 @@ export default function App() {
           }
         />
       </section>
+      {currentWork?.gradeReason ? (
+        <section className="card form-table">
+          <h3 className="section-title">AI评级说明</h3>
+          <p className="muted">{currentWork.gradeReason}</p>
+        </section>
+      ) : null}
       <button type="button" className="btn btn-primary" onClick={handleFavorite}>
         {favorites.some((x) => x.id === currentWork?.id) ? "取消收藏" : "收藏"}
       </button>
@@ -997,6 +1476,72 @@ export default function App() {
         再次编辑
       </button>
     </>
+  );
+
+  const renderMuseum = () => (
+    (() => {
+      const naturalItems = museumItems.filter((item) => item.category !== "carving");
+      const carvingItems = museumItems.filter((item) => item.category === "carving");
+      return (
+    <>
+      <header className="top-bar">
+        <h1 className="title-lg">玉苑</h1>
+        <button type="button" className="btn btn-ghost" disabled={museumRefreshing} onClick={() => void refreshMuseum()}>
+          {museumRefreshing ? "刷新中..." : "刷新"}
+        </button>
+      </header>
+      <p className="muted">玉石图鉴与文化说明，点击卡片查看详情。</p>
+
+      <section className="card form-table">
+        <h3 className="section-title">自然玉石</h3>
+        <div className="museum-grid">
+        {naturalItems.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className="museum-card"
+            onClick={() => {
+              setSelectedMuseumId(item.id);
+              navTo("museum-detail");
+            }}
+          >
+            <img src={item.image_url} alt={item.title} loading="lazy" />
+            <div className="museum-card-body">
+              <h4>{item.title}</h4>
+            </div>
+          </button>
+        ))}
+        {!naturalItems.length ? <p className="muted">暂无自然玉石内容</p> : null}
+        </div>
+      </section>
+
+      <section className="card form-table">
+        <h3 className="section-title">玉雕作品</h3>
+        <div className="museum-grid">
+        {carvingItems.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className="museum-card"
+            onClick={() => {
+              setSelectedMuseumId(item.id);
+              navTo("museum-detail");
+            }}
+          >
+            <img src={item.image_url} alt={item.title} loading="lazy" />
+            <div className="museum-card-body">
+              <h4>{item.title}</h4>
+            </div>
+          </button>
+        ))}
+        {!carvingItems.length ? <p className="muted">暂无玉雕作品内容</p> : null}
+        </div>
+      </section>
+
+      {!museumItems.length ? <p className="muted">暂无馆藏内容，稍后刷新查看。</p> : null}
+    </>
+      );
+    })()
   );
 
   const renderProfile = () => (
@@ -1032,8 +1577,18 @@ export default function App() {
           </p>
           <p>
             <strong>额度：</strong>
-            <span className="value-mono">{quotaText}</span>
           </p>
+          <div className="quota-progress-card">
+            <div className="row-between">
+              <span className="value-mono">{quotaProgress.primary}</span>
+              <span className="muted tiny">{quotaProgress.percent}%</span>
+            </div>
+            <div className="progress-track quota-progress-track">
+              <div className="progress-fill" style={{ width: `${quotaProgress.percent}%` }} />
+            </div>
+            <p className="muted tiny">{quotaProgress.secondary}</p>
+            <p className="muted tiny">{quotaText}</p>
+          </div>
         </div>
       </section>
 
@@ -1056,26 +1611,26 @@ export default function App() {
       </section>
 
       <section className="card form-table">
-        <h3 className="section-title">消息通知</h3>
-        {notices.slice(0, 3).map((n) => (
-          <article key={n.id} className="notice-item">
-            <h4>{n.title}</h4>
-            <p>{n.content}</p>
-            <p className="muted tiny">发布时间：{formatTime(n.created_at)}</p>
-          </article>
+        <div className="row-between">
+          <h3 className="section-title">消息通知</h3>
+          <div className="admin-actions-inline">
+            <button type="button" className="btn btn-ghost" disabled={noticeRefreshing} onClick={() => void refreshNoticesAndApplications()}>
+              {noticeRefreshing ? "刷新中..." : "刷新消息"}
+            </button>
+            <button type="button" className="btn btn-ghost" disabled={noticeRefreshing || unreadCount === 0} onClick={() => void handleMarkAllRead()}>
+              一键已读
+            </button>
+          </div>
+        </div>
+        {messageItems.slice(0, 10).map((item) => (
+          <button key={item.key} type="button" className={`notice-item message-item ${item.kind === "announcement" ? "notice-announcement" : "notice-normal"} ${item.isRead ? "is-read" : "is-unread"}`} onClick={() => void handleOpenMessage(item)}>
+            {!item.isRead ? <span className="message-dot" /> : null}
+            <h4>{item.title}</h4>
+            <p>{item.content}</p>
+            <p className="muted tiny">时间：{formatTime(item.createdAt)}</p>
+          </button>
         ))}
-        {applications.slice(0, 3).map((a) => (
-          <article key={a.id} className="notice-item">
-            <h4>额度申请 · {a.requested_times} 次</h4>
-            <p>
-              状态：
-              {a.status === "pending" ? "待审批" : a.status === "approved" ? "已批准" : "已驳回"}
-              {a.review_note ? `（${a.review_note}）` : ""}
-            </p>
-            <p className="muted tiny">申请时间：{formatTime(a.created_at)} ｜ 审批时间：{formatTime(a.reviewed_at)}</p>
-          </article>
-        ))}
-        {!notices.length && !applications.length ? <p className="muted">暂无通知</p> : null}
+        {!messageItems.length ? <p className="muted">暂无通知</p> : null}
       </section>
     </>
   );
@@ -1165,6 +1720,7 @@ export default function App() {
             >
               <span className="price">{n}</span>
               <span className="times">次</span>
+              <span className="quota-fee">{n === 10 ? "¥5" : n === 100 ? "¥40" : "¥350"}</span>
             </button>
           ))}
         </div>
@@ -1185,11 +1741,12 @@ export default function App() {
             placeholder="输入 1-10000 的整数"
           />
         </label>
-        <p className="muted">提交后将进入管理员审批队列，审批通过后自动增加可用额度。</p>
+        <p className="muted">自定义额度按 1 元/次计费。提交后将进入管理员审批队列，审批通过后自动增加可用额度。</p>
+        <p className="muted">申请说明：请先添加微信 yys08060910，购买后在 APP 内提交申请，我会及时审批。</p>
       </section>
 
-      <button type="button" className="btn btn-primary" onClick={handlePay}>
-        提交申请
+      <button type="button" className="btn btn-primary" onClick={handlePay} disabled={applyLoading}>
+        {applyLoading ? "提交中..." : "提交申请"}
       </button>
       {applyMessage ? <p className="muted accent">{applyMessage}</p> : null}
 
@@ -1254,15 +1811,17 @@ export default function App() {
             <button type="button" className={`admin-menu-btn ${adminMenu === "approvals" ? "active" : ""}`} onClick={() => setAdminMenu("approvals")}>事项审批</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "users" ? "active" : ""}`} onClick={() => setAdminMenu("users")}>用户管理</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "notices" ? "active" : ""}`} onClick={() => setAdminMenu("notices")}>公告发布</button>
+            <button type="button" className={`admin-menu-btn ${adminMenu === "museum" ? "active" : ""}`} onClick={() => setAdminMenu("museum")}>玉苑管理</button>
             <button type="button" className="btn btn-ghost" onClick={handleAdminLogout}>退出后台</button>
           </aside>
 
           <section className="admin-main">
             <header className="admin-topbar">
-            <h1>{adminMenu === "approvals" ? "事项审批" : adminMenu === "users" ? "用户管理" : "公告发布"}</h1>
-            <button type="button" className="btn btn-ghost" onClick={() => void loadAdminDashboard()}>刷新数据</button>
+            <h1>{adminMenu === "approvals" ? "事项审批" : adminMenu === "users" ? "用户管理" : adminMenu === "notices" ? "公告发布" : "玉苑管理"}</h1>
+            <button type="button" className="btn btn-ghost" onClick={() => void loadAdminDashboard()} disabled={loadingAdmin || adminActionLoading}>刷新数据</button>
           </header>
             {loadingAdmin ? <p className="muted">加载中...</p> : null}
+            {adminActionLoading ? <p className="muted">处理中，请稍候...</p> : null}
             {adminError ? <p className="muted" style={{ color: "#dc2626" }}>{adminError}</p> : null}
 
             {adminMenu === "approvals" ? (
@@ -1276,12 +1835,14 @@ export default function App() {
                   <article key={a.id} className="record-item">
                     <div>
                       <h4>{adminUserMap.get(a.user_id)?.nickname || "用户"}（{adminUserMap.get(a.user_id)?.email || "-"}）</h4>
+                      <p>申请人：{a.applicant_name || "-"}</p>
+                      <p>申请理由：{a.apply_reason || "未填写"}</p>
                       <p>申请额度：{a.requested_times} 次</p>
                       <p className="muted tiny">申请时间：{formatTime(a.created_at)} ｜ 审批时间：{formatTime(a.reviewed_at)}</p>
                     </div>
                     <div className="admin-actions-inline">
-                      <button type="button" className="btn btn-primary" onClick={() => handleReviewApplication(a.id, "approved")}>批准</button>
-                      <button type="button" className="btn btn-ghost" onClick={() => handleReviewApplication(a.id, "rejected")}>驳回</button>
+                       <button type="button" className="btn btn-primary" disabled={adminActionLoading} onClick={() => handleReviewApplication(a.id, "approved")}>批准</button>
+                       <button type="button" className="btn btn-ghost" disabled={adminActionLoading} onClick={() => handleReviewApplication(a.id, "rejected")}>驳回</button>
                     </div>
                   </article>
                 ))}
@@ -1298,7 +1859,7 @@ export default function App() {
                       <h4>{u.nickname}（{u.email}）</h4>
                       <p>剩余额度：{u.quota_remaining} 次（总 {u.quota_total} / 已用 {u.quota_used}）</p>
                     </div>
-                    <button type="button" className="record-delete" onClick={() => handleAdminDeleteUser(u.id)}>删除用户</button>
+                    <button type="button" className="record-delete" disabled={adminActionLoading} onClick={() => handleAdminDeleteUser(u.id)}>删除用户</button>
                   </article>
                 ))}
               </section>
@@ -1315,14 +1876,90 @@ export default function App() {
                   内容
                   <input value={noticeDraft.content} onChange={(e) => setNoticeDraft((s) => ({ ...s, content: e.target.value }))} placeholder="请输入通知内容" />
                 </label>
-                <button type="button" className="btn btn-primary" onClick={handlePublishNotice}>发布通知</button>
+                <label className="row-field">
+                  通知类型
+                  <select value={noticeDraft.kind} onChange={(e) => setNoticeDraft((s) => ({ ...s, kind: e.target.value }))}>
+                    <option value="normal">普通通知（白色）</option>
+                    <option value="announcement">公告通知（橙色）</option>
+                  </select>
+                </label>
+                <label className="row-field">
+                  发送对象
+                  <select value={noticeDraft.targetUserId} onChange={(e) => setNoticeDraft((s) => ({ ...s, targetUserId: e.target.value }))}>
+                    <option value="">全体用户</option>
+                    {(adminPayload.users || []).map((u) => (
+                      <option key={u.id} value={u.id}>{u.nickname}（{u.email}）</option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className="btn btn-primary" disabled={adminActionLoading} onClick={handlePublishNotice}>发布通知</button>
                 <h3 className="section-title">已发布公告</h3>
                 {(adminPayload.notices || []).slice(0, 20).map((n) => (
                   <article key={n.id} className="notice-item">
                     <h4>{n.title}</h4>
                     <p>{n.content}</p>
+                    <p className="muted tiny">类型：{n.kind === "announcement" ? "公告" : "普通通知"} ｜ 对象：{n.target_user_id ? (adminUserMap.get(n.target_user_id)?.nickname || n.target_user_id) : "全体用户"}</p>
                     <p className="muted tiny">发布时间：{formatTime(n.created_at)}</p>
-                    <button type="button" className="record-delete" onClick={() => handleAdminDeleteNotice(n.id)}>删除公告</button>
+                    <div className="admin-actions-inline">
+                      <button type="button" className="btn btn-ghost" disabled={adminActionLoading} onClick={() => handleAdminEditNotice(n)}>编辑公告</button>
+                      <button type="button" className="record-delete" disabled={adminActionLoading} onClick={() => handleAdminDeleteNotice(n.id)}>删除公告</button>
+                    </div>
+                  </article>
+                ))}
+              </section>
+            ) : null}
+
+            {adminMenu === "museum" ? (
+              <section className="card form-table">
+                <h3 className="section-title">发布玉苑内容</h3>
+                <p className="muted">发布必须包含图片、标题、说明三项。</p>
+                <label className="row-field">
+                  图片（本地上传）
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setMuseumFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                <label className="row-field">
+                  分类
+                  <select value={museumForm.category} onChange={(e) => setMuseumForm((s) => ({ ...s, category: e.target.value }))}>
+                    <option value="natural">自然玉石</option>
+                    <option value="carving">玉雕作品</option>
+                  </select>
+                </label>
+                <label className="row-field">
+                  标题
+                  <input
+                    value={museumForm.title}
+                    onChange={(e) => setMuseumForm((s) => ({ ...s, title: e.target.value }))}
+                    placeholder="请输入标题"
+                  />
+                </label>
+                <label className="row-field">
+                  说明
+                  <textarea
+                    value={museumForm.description}
+                    onChange={(e) => setMuseumForm((s) => ({ ...s, description: e.target.value }))}
+                    placeholder="请输入说明"
+                    rows={4}
+                  />
+                </label>
+                <button type="button" className="btn btn-primary" disabled={adminActionLoading} onClick={handlePublishMuseumItem}>
+                  发布到玉苑
+                </button>
+
+                <h3 className="section-title">已发布内容</h3>
+                {(adminPayload.museumItems || []).slice(0, 30).map((m) => (
+                  <article key={m.id} className="notice-item">
+                    <h4>{m.title}</h4>
+                    <p className="muted tiny">分类：{m.category === "carving" ? "玉雕作品" : "自然玉石"}</p>
+                    <p className="muted tiny">发布时间：{formatTime(m.created_at)}</p>
+                    <p>{m.description}</p>
+                    <div className="admin-actions-inline">
+                      <button type="button" className="btn btn-ghost" disabled={adminActionLoading} onClick={() => handleAdminEditMuseumItem(m)}>编辑</button>
+                      <button type="button" className="record-delete" disabled={adminActionLoading} onClick={() => handleAdminDeleteMuseumItem(m.id)}>删除</button>
+                    </div>
                   </article>
                 ))}
               </section>
@@ -1368,7 +2005,7 @@ export default function App() {
     <section className="generate-overlay" aria-live="polite">
       <div className="overlay-panel">
         <h3>正在生成成品</h3>
-        <p>{generatePhase === "plan" ? "正在生成设计思路..." : "正在生成设计图..."}</p>
+        <p>{generatePhase === "plan" ? "正在生成设计思路..." : generatePhase === "image" ? "正在生成设计图..." : "正在进行AI评级..."}</p>
 
         <div className="progress-item">
           <div className="row-between">
@@ -1389,12 +2026,23 @@ export default function App() {
             <div className="progress-fill" style={{ width: `${Math.round(generateProgress.image)}%` }} />
           </div>
         </div>
+
+        <div className="progress-item">
+          <div className="row-between">
+            <span>AI评级中</span>
+            <strong>{Math.round(generateProgress.rating)}%</strong>
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${Math.round(generateProgress.rating)}%` }} />
+          </div>
+        </div>
       </div>
     </section>
   );
 
   const historyDetail = history.find((x) => x.id === selectedHistoryId) || history[0];
   const favoriteDetail = favorites.find((x) => x.id === selectedFavoriteId) || favorites[0];
+  const museumDetail = museumItems.find((x) => x.id === selectedMuseumId) || museumItems[0];
 
   if (isAdminRoute) {
     return (
@@ -1417,6 +2065,7 @@ export default function App() {
     if (page === "home") content = renderHome();
     if (page === "custom") content = renderCustom();
     if (page === "product") content = renderProduct();
+    if (page === "museum") content = renderMuseum();
     if (page === "profile") content = renderProfile();
     if (page === "settings") content = renderSettings();
     if (page === "apply-quota") content = renderApplyQuota();
@@ -1472,6 +2121,28 @@ export default function App() {
         </>
       );
     }
+    if (page === "museum-detail") {
+      content = (
+        <>
+          <header className="sub-top">
+            <button type="button" className="back" onClick={navBack}>
+              ← 返回
+            </button>
+            <h1>玉苑详情</h1>
+          </header>
+          {museumDetail ? (
+            <article className="museum-detail-card">
+              <img src={museumDetail.image_url} alt={museumDetail.title} />
+              <h3>{museumDetail.title}</h3>
+              <p className="muted tiny">发布时间：{formatTime(museumDetail.created_at)}</p>
+              <p>{museumDetail.description}</p>
+            </article>
+          ) : (
+            <p className="muted">暂无详情内容</p>
+          )}
+        </>
+      );
+    }
   }
 
   return (
@@ -1486,11 +2157,65 @@ export default function App() {
           {content}
           {loadingGenerate && page === "product" ? renderGeneratingOverlay() : null}
         </section>
-        {["home", "custom", "product", "profile"].includes(page) && <Tabbar page={page} onNav={setPage} />}
+        {["home", "custom", "product", "museum", "profile"].includes(page) && <Tabbar page={page} onNav={setPage} unreadCount={unreadCount} />}
         {island.visible ? (
           <div className="island-toast" role="status" aria-live="polite">
             <span className="island-check">✓</span>
             <span>{island.message}</span>
+          </div>
+        ) : null}
+        {applyDialogOpen ? (
+          <div className="modal-backdrop" role="dialog" aria-modal="true">
+            <section className="modal-card card form-table">
+              <h3 className="section-title">提交额度申请</h3>
+              <p className="muted">请填写申请人名称，申请理由可选。</p>
+              <label className="row-field">
+                申请人名称（必填）
+                <input
+                  value={applyForm.applicantName}
+                  onChange={(e) => setApplyForm((s) => ({ ...s, applicantName: e.target.value }))}
+                  placeholder="请输入申请人名称"
+                />
+              </label>
+              <label className="row-field">
+                申请理由（选填）
+                <textarea
+                  value={applyForm.reason}
+                  onChange={(e) => setApplyForm((s) => ({ ...s, reason: e.target.value }))}
+                  placeholder="可填写用途或补充信息"
+                  rows={4}
+                />
+              </label>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-ghost" disabled={applyLoading} onClick={() => setApplyDialogOpen(false)}>
+                  取消
+                </button>
+                <button type="button" className="btn btn-primary" disabled={applyLoading} onClick={() => void handleApplyQuota()}>
+                  {applyLoading ? "提交中..." : "发送申请"}
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+        {activeMessage ? (
+          <div className="modal-backdrop" role="dialog" aria-modal="true">
+            <section className={`modal-card card form-table message-detail ${activeMessage.kind === "announcement" ? "message-detail-announcement" : "message-detail-normal"}`}>
+              <div className="row-between">
+                <h3 className="section-title">{activeMessage.title}</h3>
+                <button type="button" className="btn btn-ghost" onClick={() => setActiveMessage(null)}>
+                  关闭
+                </button>
+              </div>
+              <p className="muted tiny">消息时间：{formatTime(activeMessage.createdAt)}</p>
+              <article className="message-detail-body">
+                {String(activeMessage.content || "")
+                  .split(/\n+/)
+                  .filter(Boolean)
+                  .map((line) => (
+                    <p key={`${activeMessage.key}-${line}`}>{line}</p>
+                  ))}
+              </article>
+            </section>
           </div>
         ) : null}
       </section>

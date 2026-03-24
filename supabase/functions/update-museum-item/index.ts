@@ -50,47 +50,25 @@ Deno.serve(async (req) => {
       .single();
     if (profileError || !profile?.is_admin) return json({ message: "Forbidden" }, 403);
 
-    const body = (await req.json()) as {
-      title?: string;
-      content?: string;
-      kind?: string;
-      targetUserId?: string | null;
-      active?: boolean;
-    };
-
+    const body = (await req.json()) as { itemId?: string; category?: string; title?: string; description?: string };
+    const itemId = String(body.itemId || "").trim();
+    const category = String(body.category || "natural").trim() === "carving" ? "carving" : "natural";
     const title = String(body.title || "").trim().slice(0, 80);
-    const content = String(body.content || "").trim().slice(0, 500);
-    const kind = String(body.kind || "normal").trim() === "announcement" ? "announcement" : "normal";
-    const targetUserId = body.targetUserId ? String(body.targetUserId).trim() : null;
-    const active = body.active !== false;
+    const description = String(body.description || "").trim().slice(0, 2000);
+    if (!itemId) return json({ message: "itemId required" }, 400);
     if (title.length < 2) return json({ message: "标题至少 2 个字" }, 400);
-    if (content.length < 2) return json({ message: "内容至少 2 个字" }, 400);
+    if (description.length < 2) return json({ message: "说明至少 2 个字" }, 400);
 
-    if (targetUserId) {
-      const { data: userExists, error: userErr } = await adminClient
-        .from("user_profiles")
-        .select("id")
-        .eq("id", targetUserId)
-        .maybeSingle();
-      if (userErr) return json({ message: userErr.message }, 500);
-      if (!userExists) return json({ message: "目标用户不存在" }, 400);
-    }
-
-    const { data: row, error: insertError } = await adminClient
-      .from("notices")
-      .insert({
-        title,
-        content,
-        kind,
-        target_user_id: targetUserId,
-        active,
-        created_by: authData.user.id,
-      })
-      .select("id,title,content,kind,target_user_id,active,created_at")
+    const { data: row, error: updateError } = await adminClient
+      .from("museum_items")
+      .update({ category, title, description, updated_at: new Date().toISOString() })
+      .eq("id", itemId)
+      .select("id,category,title,description,image_url,active,created_at,updated_at")
       .single();
-    if (insertError || !row) return json({ message: insertError?.message || "发布失败" }, 500);
 
-    return json({ notice: row, message: "通知已发布" });
+    if (updateError || !row) return json({ message: updateError?.message || "更新失败" }, 500);
+
+    return json({ item: row, message: "玉苑内容已更新" });
   } catch (e) {
     return json({ message: e instanceof Error ? e.message : "Unexpected error" }, 500);
   }

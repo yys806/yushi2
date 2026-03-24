@@ -56,17 +56,24 @@ Deno.serve(async (req) => {
 
     const { data: apps, error: appsError } = await adminClient
       .from("quota_applications")
-      .select("id,user_id,requested_times,status,review_note,reviewed_at,created_at")
+      .select("id,user_id,applicant_name,apply_reason,requested_times,status,review_note,reviewed_at,created_at")
       .order("created_at", { ascending: false })
       .limit(200);
     if (appsError) return json({ message: appsError.message }, 500);
 
     const { data: notices, error: noticesError } = await adminClient
       .from("notices")
-      .select("id,title,content,active,created_at")
+      .select("id,title,content,kind,target_user_id,active,created_at")
       .order("created_at", { ascending: false })
       .limit(50);
     if (noticesError) return json({ message: noticesError.message }, 500);
+
+    const { data: museumItems, error: museumError } = await adminClient
+      .from("museum_items")
+      .select("id,category,title,description,image_url,active,created_at")
+      .order("created_at", { ascending: false })
+      .limit(100);
+    if (museumError && museumError.code !== "42P01") return json({ message: museumError.message }, 500);
 
     const usersWithRemaining = (users || []).map((u) => ({
       ...u,
@@ -77,6 +84,7 @@ Deno.serve(async (req) => {
       users: usersWithRemaining,
       applications: apps || [],
       notices: notices || [],
+      museumItems: museumError ? [] : museumItems || [],
     });
   } catch (e) {
     return json({ message: e instanceof Error ? e.message : "Unexpected error" }, 500);

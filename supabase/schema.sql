@@ -44,6 +44,9 @@ create table if not exists public.works (
   created_at timestamptz not null default now()
 );
 
+alter table public.works add column if not exists grade_score integer;
+alter table public.works add column if not exists grade_reason text;
+
 create index if not exists works_user_created_idx on public.works(user_id, created_at desc);
 
 create table if not exists public.favorites (
@@ -84,6 +87,8 @@ create index if not exists orders_user_created_idx on public.orders(user_id, cre
 create table if not exists public.quota_applications (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
+  applicant_name text,
+  apply_reason text,
   requested_times integer not null check (requested_times > 0 and requested_times <= 10000),
   status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
   review_note text,
@@ -92,6 +97,9 @@ create table if not exists public.quota_applications (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.quota_applications add column if not exists applicant_name text;
+alter table public.quota_applications add column if not exists apply_reason text;
 
 create index if not exists quota_applications_user_created_idx on public.quota_applications(user_id, created_at desc);
 create index if not exists quota_applications_status_created_idx on public.quota_applications(status, created_at desc);
@@ -103,12 +111,53 @@ create table if not exists public.notices (
   id uuid primary key default gen_random_uuid(),
   title text not null,
   content text not null,
+  kind text not null default 'normal' check (kind in ('normal', 'announcement')),
+  target_user_id uuid references auth.users(id) on delete cascade,
   active boolean not null default true,
   created_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
+alter table public.notices add column if not exists kind text not null default 'normal';
+alter table public.notices add column if not exists target_user_id uuid references auth.users(id) on delete cascade;
+alter table public.notices drop constraint if exists notices_kind_check;
+alter table public.notices add constraint notices_kind_check check (kind in ('normal', 'announcement'));
+
 create index if not exists notices_active_created_idx on public.notices(active, created_at desc);
+create index if not exists notices_target_user_created_idx on public.notices(target_user_id, created_at desc);
+
+create table if not exists public.message_reads (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  message_type text not null check (message_type in ('notice', 'application')),
+  message_id uuid not null,
+  read_at timestamptz not null default now(),
+  unique(user_id, message_type, message_id)
+);
+
+create index if not exists message_reads_user_read_idx on public.message_reads(user_id, read_at desc);
+
+create table if not exists public.museum_items (
+  id uuid primary key default gen_random_uuid(),
+  category text not null default 'natural' check (category in ('natural', 'carving')),
+  title text not null,
+  description text not null,
+  image_url text not null,
+  active boolean not null default true,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.museum_items add column if not exists category text not null default 'natural';
+alter table public.museum_items drop constraint if exists museum_items_category_check;
+alter table public.museum_items add constraint museum_items_category_check check (category in ('natural', 'carving'));
+
+create index if not exists museum_items_active_created_idx on public.museum_items(active, created_at desc);
+
+insert into storage.buckets (id, name, public)
+values ('museum-assets', 'museum-assets', true)
+on conflict (id) do update set public = true;
 
 insert into public.recharge_packages(id, name, amount, times, active)
 values
@@ -161,6 +210,8 @@ alter table public.recharge_packages enable row level security;
 alter table public.orders enable row level security;
 alter table public.quota_applications enable row level security;
 alter table public.notices enable row level security;
+alter table public.message_reads enable row level security;
+alter table public.museum_items enable row level security;
 
 drop policy if exists "profiles_select_own" on public.user_profiles;
 create policy "profiles_select_own" on public.user_profiles
@@ -224,8 +275,63 @@ for update to authenticated using (public.is_admin_user(auth.uid())) with check 
 
 drop policy if exists "notices_select_active" on public.notices;
 create policy "notices_select_active" on public.notices
-for select to authenticated using (active = true or public.is_admin_user(auth.uid()));
+for select to authenticated using (
+  public.is_admin_user(auth.uid())
+  or (active = true and (target_user_id is null or target_user_id = auth.uid()))
+);
 
 drop policy if exists "notices_insert_admin" on public.notices;
 create policy "notices_insert_admin" on public.notices
 for insert to authenticated with check (public.is_admin_user(auth.uid()));
+
+drop policy if exists "notices_update_admin" on public.notices;
+create policy "notices_update_admin" on public.notices
+for update to authenticated using (public.is_admin_user(auth.uid())) with check (public.is_admin_user(auth.uid()));
+
+drop policy if exists "notices_delete_admin" on public.notices;
+create policy "notices_delete_admin" on public.notices
+for delete to authenticated using (public.is_admin_user(auth.uid()));
+
+drop policy if exists "message_reads_select_own" on public.message_reads;
+create policy "message_reads_select_own" on public.message_reads
+for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "message_reads_insert_own" on public.message_reads;
+create policy "message_reads_insert_own" on public.message_reads
+for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "message_reads_update_own" on public.message_reads;
+create policy "message_reads_update_own" on public.message_reads
+for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "museum_select_active" on public.museum_items;
+create policy "museum_select_active" on public.museum_items
+for select to authenticated using (active = true or public.is_admin_user(auth.uid()));
+
+drop policy if exists "museum_insert_admin" on public.museum_items;
+create policy "museum_insert_admin" on public.museum_items
+for insert to authenticated with check (public.is_admin_user(auth.uid()));
+
+drop policy if exists "museum_update_admin" on public.museum_items;
+create policy "museum_update_admin" on public.museum_items
+for update to authenticated using (public.is_admin_user(auth.uid())) with check (public.is_admin_user(auth.uid()));
+
+drop policy if exists "museum_delete_admin" on public.museum_items;
+create policy "museum_delete_admin" on public.museum_items
+for delete to authenticated using (public.is_admin_user(auth.uid()));
+
+drop policy if exists "museum_storage_public_read" on storage.objects;
+create policy "museum_storage_public_read" on storage.objects
+for select to public using (bucket_id = 'museum-assets');
+
+drop policy if exists "museum_storage_admin_insert" on storage.objects;
+create policy "museum_storage_admin_insert" on storage.objects
+for insert to authenticated with check (bucket_id = 'museum-assets' and public.is_admin_user(auth.uid()));
+
+drop policy if exists "museum_storage_admin_update" on storage.objects;
+create policy "museum_storage_admin_update" on storage.objects
+for update to authenticated using (bucket_id = 'museum-assets' and public.is_admin_user(auth.uid())) with check (bucket_id = 'museum-assets' and public.is_admin_user(auth.uid()));
+
+drop policy if exists "museum_storage_admin_delete" on storage.objects;
+create policy "museum_storage_admin_delete" on storage.objects
+for delete to authenticated using (bucket_id = 'museum-assets' and public.is_admin_user(auth.uid()));

@@ -59,13 +59,18 @@ npm run supabase:deploy:functions
 This deploys:
 
 - `generate-work`
+- `rate-work`
 - `create-order`
 - `signup-user` (JWT verification disabled to allow pre-login registration)
 - `admin-dashboard`
 - `review-application`
 - `publish-notice`
+- `update-notice`
+- `publish-museum-item`
+- `update-museum-item`
 - `admin-delete-user`
 - `admin-delete-notice`
+- `admin-delete-museum-item`
 
 Note: all functions are deployed with `--no-verify-jwt` at gateway level, but each function performs auth checks internally via `Authorization` header and `supabase.auth.getUser()`. This avoids gateway-side `Invalid JWT` false negatives while keeping business actions protected.
 

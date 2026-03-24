@@ -23,8 +23,6 @@ Deno.serve(async (req) => {
     });
   }
 
-  if (req.method !== "POST") return json({ message: "Method not allowed" }, 405);
-
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
@@ -51,46 +49,40 @@ Deno.serve(async (req) => {
     if (profileError || !profile?.is_admin) return json({ message: "Forbidden" }, 403);
 
     const body = (await req.json()) as {
+      category?: string;
       title?: string;
-      content?: string;
-      kind?: string;
-      targetUserId?: string | null;
+      description?: string;
+      imageUrl?: string;
       active?: boolean;
     };
 
-    const title = String(body.title || "").trim().slice(0, 80);
-    const content = String(body.content || "").trim().slice(0, 500);
-    const kind = String(body.kind || "normal").trim() === "announcement" ? "announcement" : "normal";
-    const targetUserId = body.targetUserId ? String(body.targetUserId).trim() : null;
+    const category = String(body.category || "natural").trim() === "carving" ? "carving" : "natural";
+    const title = String(body.title || "").trim();
+    const description = String(body.description || "").trim();
+    const imageUrl = String(body.imageUrl || "").trim();
     const active = body.active !== false;
-    if (title.length < 2) return json({ message: "标题至少 2 个字" }, 400);
-    if (content.length < 2) return json({ message: "内容至少 2 个字" }, 400);
 
-    if (targetUserId) {
-      const { data: userExists, error: userErr } = await adminClient
-        .from("user_profiles")
-        .select("id")
-        .eq("id", targetUserId)
-        .maybeSingle();
-      if (userErr) return json({ message: userErr.message }, 500);
-      if (!userExists) return json({ message: "目标用户不存在" }, 400);
+    if (!title || !description || !imageUrl) {
+      return json({ message: "title/description/imageUrl are required" }, 400);
     }
+    if (title.length > 80) return json({ message: "标题不能超过80字" }, 400);
+    if (description.length > 2000) return json({ message: "说明不能超过2000字" }, 400);
 
-    const { data: row, error: insertError } = await adminClient
-      .from("notices")
+    const { data: inserted, error: insertError } = await adminClient
+      .from("museum_items")
       .insert({
+        category,
         title,
-        content,
-        kind,
-        target_user_id: targetUserId,
+        description,
+        image_url: imageUrl,
         active,
         created_by: authData.user.id,
       })
-      .select("id,title,content,kind,target_user_id,active,created_at")
+      .select("id,category,title,description,image_url,active,created_at")
       .single();
-    if (insertError || !row) return json({ message: insertError?.message || "发布失败" }, 500);
 
-    return json({ notice: row, message: "通知已发布" });
+    if (insertError) return json({ message: insertError.message }, 500);
+    return json({ item: inserted });
   } catch (e) {
     return json({ message: e instanceof Error ? e.message : "Unexpected error" }, 500);
   }

@@ -51,18 +51,18 @@ Deno.serve(async (req) => {
     if (profileError || !profile?.is_admin) return json({ message: "Forbidden" }, 403);
 
     const body = (await req.json()) as {
+      noticeId?: string;
       title?: string;
       content?: string;
       kind?: string;
       targetUserId?: string | null;
-      active?: boolean;
     };
-
+    const noticeId = String(body.noticeId || "").trim();
     const title = String(body.title || "").trim().slice(0, 80);
     const content = String(body.content || "").trim().slice(0, 500);
     const kind = String(body.kind || "normal").trim() === "announcement" ? "announcement" : "normal";
     const targetUserId = body.targetUserId ? String(body.targetUserId).trim() : null;
-    const active = body.active !== false;
+    if (!noticeId) return json({ message: "noticeId required" }, 400);
     if (title.length < 2) return json({ message: "标题至少 2 个字" }, 400);
     if (content.length < 2) return json({ message: "内容至少 2 个字" }, 400);
 
@@ -76,21 +76,16 @@ Deno.serve(async (req) => {
       if (!userExists) return json({ message: "目标用户不存在" }, 400);
     }
 
-    const { data: row, error: insertError } = await adminClient
+    const { data: row, error: updateError } = await adminClient
       .from("notices")
-      .insert({
-        title,
-        content,
-        kind,
-        target_user_id: targetUserId,
-        active,
-        created_by: authData.user.id,
-      })
+      .update({ title, content, kind, target_user_id: targetUserId })
+      .eq("id", noticeId)
       .select("id,title,content,kind,target_user_id,active,created_at")
       .single();
-    if (insertError || !row) return json({ message: insertError?.message || "发布失败" }, 500);
 
-    return json({ notice: row, message: "通知已发布" });
+    if (updateError || !row) return json({ message: updateError?.message || "更新失败" }, 500);
+
+    return json({ notice: row, message: "公告已更新" });
   } catch (e) {
     return json({ message: e instanceof Error ? e.message : "Unexpected error" }, 500);
   }

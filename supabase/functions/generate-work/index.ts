@@ -308,7 +308,8 @@ Deno.serve(async (req) => {
         title,
         inspiration: text.inspiration,
         meaning: text.meaning,
-        grade: "A 级",
+        grade: "评级中...",
+        grade_reason: "正在由AI进行评分",
         image_url: imageUrl,
       })
       .select("*")
@@ -336,6 +337,7 @@ Deno.serve(async (req) => {
         inspiration: inserted.inspiration,
         meaning: inserted.meaning,
         grade: inserted.grade,
+        gradeReason: inserted.grade_reason,
         imageUrl: inserted.image_url,
         createdAt: new Date(inserted.created_at).getTime(),
       },

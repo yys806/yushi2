@@ -50,47 +50,14 @@ Deno.serve(async (req) => {
       .single();
     if (profileError || !profile?.is_admin) return json({ message: "Forbidden" }, 403);
 
-    const body = (await req.json()) as {
-      title?: string;
-      content?: string;
-      kind?: string;
-      targetUserId?: string | null;
-      active?: boolean;
-    };
+    const body = (await req.json()) as { itemId?: string };
+    const itemId = String(body.itemId || "").trim();
+    if (!itemId) return json({ message: "itemId required" }, 400);
 
-    const title = String(body.title || "").trim().slice(0, 80);
-    const content = String(body.content || "").trim().slice(0, 500);
-    const kind = String(body.kind || "normal").trim() === "announcement" ? "announcement" : "normal";
-    const targetUserId = body.targetUserId ? String(body.targetUserId).trim() : null;
-    const active = body.active !== false;
-    if (title.length < 2) return json({ message: "标题至少 2 个字" }, 400);
-    if (content.length < 2) return json({ message: "内容至少 2 个字" }, 400);
+    const { error: delError } = await adminClient.from("museum_items").delete().eq("id", itemId);
+    if (delError) return json({ message: delError.message }, 500);
 
-    if (targetUserId) {
-      const { data: userExists, error: userErr } = await adminClient
-        .from("user_profiles")
-        .select("id")
-        .eq("id", targetUserId)
-        .maybeSingle();
-      if (userErr) return json({ message: userErr.message }, 500);
-      if (!userExists) return json({ message: "目标用户不存在" }, 400);
-    }
-
-    const { data: row, error: insertError } = await adminClient
-      .from("notices")
-      .insert({
-        title,
-        content,
-        kind,
-        target_user_id: targetUserId,
-        active,
-        created_by: authData.user.id,
-      })
-      .select("id,title,content,kind,target_user_id,active,created_at")
-      .single();
-    if (insertError || !row) return json({ message: insertError?.message || "发布失败" }, 500);
-
-    return json({ notice: row, message: "通知已发布" });
+    return json({ message: "玉苑内容已删除", id: itemId });
   } catch (e) {
     return json({ message: e instanceof Error ? e.message : "Unexpected error" }, 500);
   }
