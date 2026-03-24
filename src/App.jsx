@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
+import { supabase } from "./supabaseClient";
 
 const jadeImages = [
   new URL("../images/generated-1774269443226.png", import.meta.url).href,
@@ -19,23 +18,7 @@ const options = {
   color: ["破空蓝", "中国红", "远山青", "王者金", "霸道紫"],
 };
 
-async function api(path, { method = "GET", token, body } = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!response.ok) {
-    throw new Error(data?.message || `请求失败(${response.status})`);
-  }
-  return data;
-}
+const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 
 function formatBudget(v) {
   return v >= 10000 ? "¥10000+" : `¥${v}`;
@@ -48,7 +31,7 @@ function mapWork(item) {
     summary: `材质：${item.material}，纹饰：${item.pattern}`,
     detailInspo: item.inspiration,
     detailMeaning: item.meaning,
-    image: item.imageUrl || jadeImages[0],
+    image: item.image_url || item.imageUrl || jadeImages[0],
     grade: item.grade || "A 级",
   };
 }
@@ -90,11 +73,7 @@ function AuthPage({ loading, error, mode, form, onChange, onMode, onSubmit }) {
       <section className="card form-table">
         <label className="row-field">
           邮箱
-          <input
-            value={form.email}
-            onChange={(e) => onChange("email", e.target.value)}
-            placeholder="请输入邮箱"
-          />
+          <input value={form.email} onChange={(e) => onChange("email", e.target.value)} placeholder="请输入邮箱" />
         </label>
         <label className="row-field">
           密码
@@ -107,6 +86,17 @@ function AuthPage({ loading, error, mode, form, onChange, onMode, onSubmit }) {
         </label>
         {mode === "register" && (
           <label className="row-field">
+            确认密码
+            <input
+              type="password"
+              value={form.confirmPassword}
+              onChange={(e) => onChange("confirmPassword", e.target.value)}
+              placeholder="请再次输入密码"
+            />
+          </label>
+        )}
+        {mode === "register" && (
+          <label className="row-field">
             昵称
             <input
               value={form.nickname}
@@ -115,17 +105,22 @@ function AuthPage({ loading, error, mode, form, onChange, onMode, onSubmit }) {
             />
           </label>
         )}
+        {mode === "register" && (
+          <p className="muted tiny">密码至少 8 位，且必须包含：大写字母、小写字母、数字、符号。</p>
+        )}
       </section>
 
       <button type="button" className="btn btn-primary" disabled={loading} onClick={onSubmit}>
         {loading ? "提交中..." : mode === "register" ? "注册并进入" : "登录并进入"}
       </button>
-
       <button type="button" className="btn btn-ghost" onClick={onMode}>
         {mode === "register" ? "已有账号？去登录" : "没有账号？去注册"}
       </button>
-
-      {error ? <p className="muted" style={{ color: "#dc2626" }}>{error}</p> : null}
+      {error ? (
+        <p className="muted" style={{ color: "#dc2626" }}>
+          {error}
+        </p>
+      ) : null}
     </>
   );
 }
@@ -159,10 +154,11 @@ function Tabbar({ page, onNav }) {
 export default function App() {
   const [page, setPage] = useState("home");
   const [stack, setStack] = useState([]);
-  const [token, setToken] = useState(localStorage.getItem("yushi_token") || "");
+  const [session, setSession] = useState(null);
+  const [user, setUser] = useState(null);
 
   const [authMode, setAuthMode] = useState("register");
-  const [authForm, setAuthForm] = useState({ email: "", password: "", nickname: "" });
+  const [authForm, setAuthForm] = useState({ email: "", password: "", confirmPassword: "", nickname: "" });
 
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
@@ -172,8 +168,11 @@ export default function App() {
 
   const [loadingAuth, setLoadingAuth] = useState(false);
   const [loadingGenerate, setLoadingGenerate] = useState(false);
+  const [generatePhase, setGeneratePhase] = useState("idle");
+  const [generateProgress, setGenerateProgress] = useState({ plan: 0, image: 0 });
   const [loadingData, setLoadingData] = useState(false);
   const [error, setError] = useState("");
+  const [island, setIsland] = useState({ visible: false, message: "" });
   const [payMethod, setPayMethod] = useState("wechat");
   const [selectedPackage, setSelectedPackage] = useState("pkg_9_9");
   const [customTimes, setCustomTimes] = useState(100);
@@ -184,13 +183,31 @@ export default function App() {
     form: "吊坠",
     color: "破空蓝",
     budget: 3000,
-    subject: "山海神龙守护",
+    recipient: "送给妈妈",
     customInput: "",
   });
 
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
   const [selectedFavoriteId, setSelectedFavoriteId] = useState("");
   const carouselRef = useRef(null);
+  const islandTimerRef = useRef(null);
+  const [profileEdit, setProfileEdit] = useState({
+    nickname: "",
+    oldPassword: "",
+    newPassword: "",
+    confirmNewPassword: "",
+  });
+
+  const showIsland = useCallback((message) => {
+    if (islandTimerRef.current) {
+      window.clearTimeout(islandTimerRef.current);
+    }
+    setIsland({ visible: true, message });
+    islandTimerRef.current = window.setTimeout(() => {
+      setIsland({ visible: false, message: "" });
+      islandTimerRef.current = null;
+    }, 1800);
+  }, []);
 
   const navTo = (next) => {
     setStack((s) => [...s, page]);
@@ -206,44 +223,146 @@ export default function App() {
     });
   };
 
-  const loadUserData = useCallback(async (t) => {
+  const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const animateProgressBar = async (key, target, step = 1, delay = 130) => {
+    while (true) {
+      let done = false;
+      setGenerateProgress((prev) => {
+        const current = prev[key];
+        if (current >= target) {
+          done = true;
+          return prev;
+        }
+        const next = Math.min(target, current + step);
+        return {
+          ...prev,
+          [key]: next,
+        };
+      });
+      if (done) return;
+      await sleep(delay);
+    }
+  };
+
+  const loadUserData = useCallback(async (u) => {
+    if (!u) return;
     setLoadingData(true);
     setError("");
+
     try {
-      const [me, works, favs, pkgs] = await Promise.all([
-        api("/auth/me", { token: t }),
-        api("/works/history", { token: t }),
-        api("/works/favorites", { token: t }),
-        api("/recharge/packages", { token: t }),
-      ]);
-      setProfile(me);
-      setHistory((works || []).map(mapWork));
-      setFavorites((favs || []).map(mapWork));
-      setPackages(pkgs || []);
+      const { data: profileRow, error: profileErr } = await supabase
+        .from("user_profiles")
+        .select("id,email,nickname,quota_total,quota_used,is_admin")
+        .eq("id", u.id)
+        .maybeSingle();
+
+      if (profileErr) throw profileErr;
+
+      setProfile({
+        id: profileRow?.id,
+        email: profileRow?.email || u.email || "",
+        nickname: profileRow?.nickname || u.user_metadata?.nickname || "用户",
+        quotaTotal: profileRow?.quota_total ?? 5,
+        quotaUsed: profileRow?.quota_used ?? 0,
+        quotaRemaining: profileRow?.is_admin ? -1 : Math.max(0, (profileRow?.quota_total ?? 5) - (profileRow?.quota_used ?? 0)),
+        isAdmin: Boolean(profileRow?.is_admin),
+      });
+
+      const { data: works, error: worksErr } = await supabase
+        .from("works")
+        .select("*")
+        .eq("user_id", u.id)
+        .order("created_at", { ascending: false });
+      if (worksErr) throw worksErr;
+
+      const mappedHistory = (works || []).map(mapWork);
+      setHistory(mappedHistory);
+
+      const { data: favRows, error: favErr } = await supabase
+        .from("favorites")
+        .select("work_id, works(*)")
+        .eq("user_id", u.id)
+        .order("created_at", { ascending: false });
+      if (favErr) throw favErr;
+
+      const mappedFav = (favRows || []).map((row) => mapWork(row.works));
+      setFavorites(mappedFav);
+
+      const { data: pkgRows, error: pkgErr } = await supabase
+        .from("recharge_packages")
+        .select("id,name,amount,times")
+        .eq("active", true)
+        .order("amount", { ascending: true });
+      if (pkgErr) throw pkgErr;
+
+      setPackages(pkgRows || []);
+      if (pkgRows?.length) setSelectedPackage(pkgRows[0].id);
+      if (mappedHistory.length && !currentWork) setCurrentWork(mappedHistory[0]);
     } catch (e) {
-      setError(e.message || "加载失败");
+      setError(e?.message || "加载失败");
     } finally {
       setLoadingData(false);
     }
+  }, [currentWork]);
+
+  useEffect(() => {
+    return () => {
+      if (islandTimerRef.current) {
+        window.clearTimeout(islandTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
-    if (!token) return;
-    void loadUserData(token);
-  }, [token, loadUserData]);
+    setProfileEdit((prev) => ({
+      ...prev,
+      nickname: profile?.nickname || "",
+    }));
+  }, [profile?.nickname]);
+
+  useEffect(() => {
+    let mounted = true;
+    void supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session);
+      setUser(data.session?.user ?? null);
+    });
+
+    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setUser(nextSession?.user ?? null);
+      if (!nextSession?.user) {
+        setProfile(null);
+        setHistory([]);
+        setFavorites([]);
+        setCurrentWork(null);
+        setPage("home");
+        setStack([]);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    void loadUserData(user);
+  }, [user, loadUserData]);
 
   useEffect(() => {
     if (page !== "home") return undefined;
     const el = carouselRef.current;
     if (!el) return undefined;
-
     const timer = window.setInterval(() => {
       const maxScroll = el.scrollWidth - el.clientWidth;
       const next = el.scrollLeft + 162;
       if (next >= maxScroll - 4) el.scrollTo({ left: 0, behavior: "smooth" });
       else el.scrollTo({ left: next, behavior: "smooth" });
     }, 2200);
-
     return () => window.clearInterval(timer);
   }, [page]);
 
@@ -251,83 +370,247 @@ export default function App() {
     setLoadingAuth(true);
     setError("");
     try {
-      const body =
-        authMode === "register"
-          ? { email: authForm.email, password: authForm.password, nickname: authForm.nickname }
-          : { email: authForm.email, password: authForm.password };
-      const path = authMode === "register" ? "/auth/register" : "/auth/login";
-      const result = await api(path, { method: "POST", body });
-      localStorage.setItem("yushi_token", result.accessToken);
-      setToken(result.accessToken);
+      if (authMode === "register") {
+        if (!PASSWORD_RULE.test(authForm.password)) {
+          throw new Error("密码至少 8 位，且必须包含大小写字母、数字和符号");
+        }
+        if (authForm.password !== authForm.confirmPassword) {
+          throw new Error("两次输入的密码不一致");
+        }
+
+        const email = authForm.email.trim();
+        const password = authForm.password;
+        const nickname = authForm.nickname.trim();
+        if (nickname.length < 2) {
+          throw new Error("昵称至少 2 个字，且不能重复");
+        }
+
+        const { error: registerError } = await supabase.functions.invoke("signup-user", {
+          body: { email, password, nickname },
+        });
+        if (registerError) throw registerError;
+
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (signInError) throw signInError;
+      } else {
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email: authForm.email.trim(),
+          password: authForm.password,
+        });
+        if (signInError) throw signInError;
+      }
+
       setPage("home");
       setStack([]);
     } catch (e) {
-      setError(e.message || "登录/注册失败");
+      setError(e?.message || "登录/注册失败");
     } finally {
       setLoadingAuth(false);
     }
   };
 
   const handleGenerate = async () => {
+    if (!session?.access_token) return;
+    const recipient = custom.recipient.trim();
+    if (recipient.length < 2) {
+      setError("请填写送给的对象（至少 2 个字）");
+      return;
+    }
+
     setLoadingGenerate(true);
+    setGeneratePhase("plan");
+    setGenerateProgress({ plan: 0, image: 0 });
     setError("");
+    if (page !== "product") navTo("product");
     try {
-      const work = await api("/generate/work", {
-        method: "POST",
-        token,
+      const invokePromise = supabase.functions.invoke("generate-work", {
         body: {
           material: custom.material,
           pattern: custom.pattern,
           productType: custom.form,
           budget: custom.budget,
-          subject: custom.subject,
+          subject: `送给${recipient}的专属祝福`,
           styleHint: custom.color,
           customInput: custom.customInput,
         },
       });
-      const mapped = mapWork(work);
+
+      await animateProgressBar("plan", 100, 1, 95);
+      showIsland("设计思路已完成");
+
+      setGeneratePhase("image");
+      const stageTwoCapPromise = animateProgressBar("image", 86, 1, 120);
+      const { data, error: invokeError } = await invokePromise;
+      await stageTwoCapPromise;
+      if (invokeError) throw invokeError;
+
+      await animateProgressBar("image", 100, 2, 70);
+      showIsland("设计已全部完成");
+
+      const mapped = mapWork(data?.work ?? data);
       setCurrentWork(mapped);
       setHistory((h) => [mapped, ...h]);
-      navTo("product");
-      await loadUserData(token);
+      await loadUserData(user);
     } catch (e) {
-      setError(e.message || "生成失败");
+      setError(e?.message || "生成失败");
     } finally {
-      setLoadingGenerate(false);
+      window.setTimeout(() => {
+        setLoadingGenerate(false);
+        setGeneratePhase("idle");
+        setGenerateProgress({ plan: 0, image: 0 });
+      }, 320);
     }
   };
 
   const handleFavorite = async () => {
-    if (!currentWork) return;
+    if (!currentWork || !user) return;
     setError("");
     try {
       const exists = favorites.some((x) => x.id === currentWork.id);
-      await api(`/works/${currentWork.id}/favorite`, {
-        method: exists ? "DELETE" : "POST",
-        token,
-      });
-      await loadUserData(token);
+      if (exists) {
+        const { error: delErr } = await supabase
+          .from("favorites")
+          .delete()
+          .eq("user_id", user.id)
+          .eq("work_id", currentWork.id);
+        if (delErr) throw delErr;
+        showIsland("已取消收藏");
+      } else {
+        const { error: insertErr } = await supabase.from("favorites").insert({
+          user_id: user.id,
+          work_id: currentWork.id,
+        });
+        if (insertErr) throw insertErr;
+        showIsland("收藏成功");
+      }
+
+      await loadUserData(user);
     } catch (e) {
-      setError(e.message || "收藏失败");
+      setError(e?.message || "收藏失败");
+    }
+  };
+
+  const handleDeleteHistory = async (workId) => {
+    if (!user || !workId) return;
+    if (!window.confirm("确定删除这条历史记录吗？")) return;
+    setError("");
+    try {
+      const { error: delErr } = await supabase.from("works").delete().eq("user_id", user.id).eq("id", workId);
+      if (delErr) throw delErr;
+      if (currentWork?.id === workId) setCurrentWork(null);
+      await loadUserData(user);
+      showIsland("历史已删除");
+    } catch (e) {
+      setError(e?.message || "删除失败");
+    }
+  };
+
+  const handleDeleteFavorite = async (workId) => {
+    if (!user || !workId) return;
+    if (!window.confirm("确定删除这条收藏吗？")) return;
+    setError("");
+    try {
+      const { error: delErr } = await supabase
+        .from("favorites")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("work_id", workId);
+      if (delErr) throw delErr;
+      await loadUserData(user);
+      showIsland("收藏已删除");
+    } catch (e) {
+      setError(e?.message || "删除失败");
+    }
+  };
+
+  const handleUpdateNickname = async () => {
+    if (!user) return;
+    const nickname = profileEdit.nickname.trim();
+    if (nickname.length < 2) {
+      setError("昵称至少 2 个字");
+      return;
+    }
+    setError("");
+    try {
+      const { data: dupRow, error: dupErr } = await supabase
+        .from("user_profiles")
+        .select("id")
+        .eq("nickname", nickname)
+        .neq("id", user.id)
+        .maybeSingle();
+      if (dupErr) throw dupErr;
+      if (dupRow?.id) {
+        throw new Error("昵称已被占用，请换一个");
+      }
+
+      const { error: updateErr } = await supabase.from("user_profiles").update({ nickname }).eq("id", user.id);
+      if (updateErr) throw updateErr;
+      await supabase.auth.updateUser({ data: { ...user.user_metadata, nickname } });
+      await loadUserData(user);
+      showIsland("昵称已更新");
+    } catch (e) {
+      setError(e?.message || "昵称更新失败");
+    }
+  };
+
+  const handleChangePassword = async () => {
+    if (!user?.email) return;
+    if (!profileEdit.oldPassword || !profileEdit.newPassword || !profileEdit.confirmNewPassword) {
+      setError("请完整填写密码修改表单");
+      return;
+    }
+    if (!PASSWORD_RULE.test(profileEdit.newPassword)) {
+      setError("新密码至少 8 位，且必须包含大小写字母、数字和符号");
+      return;
+    }
+    if (profileEdit.newPassword !== profileEdit.confirmNewPassword) {
+      setError("两次新密码不一致");
+      return;
+    }
+
+    setError("");
+    try {
+      const { error: checkErr } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: profileEdit.oldPassword,
+      });
+      if (checkErr) throw new Error("旧密码不正确");
+
+      const { error: changeErr } = await supabase.auth.updateUser({
+        password: profileEdit.newPassword,
+      });
+      if (changeErr) throw changeErr;
+
+      setProfileEdit((prev) => ({
+        ...prev,
+        oldPassword: "",
+        newPassword: "",
+        confirmNewPassword: "",
+      }));
+      showIsland("密码修改成功");
+    } catch (e) {
+      setError(e?.message || "密码修改失败");
     }
   };
 
   const handlePay = async () => {
     setError("");
     try {
-      await api("/recharge/order", {
-        method: "POST",
-        token,
+      const { error: invokeError } = await supabase.functions.invoke("create-order", {
         body: {
-          packageId: selectedPackage || undefined,
+          packageId: selectedPackage,
           payChannel: payMethod,
           customTimes,
         },
       });
-      await loadUserData(token);
+      if (invokeError) throw invokeError;
+      await loadUserData(user);
       navBack();
     } catch (e) {
-      setError(e.message || "充值失败");
+      setError(e?.message || "充值失败");
     }
   };
 
@@ -337,7 +620,7 @@ export default function App() {
     return `免费总计 ${profile.quotaTotal} 次（剩余 ${profile.quotaRemaining} 次）`;
   }, [profile]);
 
-  if (!token) {
+  if (!user) {
     return (
       <main className="app-shell">
         <section className="app">
@@ -382,17 +665,12 @@ export default function App() {
         </div>
       </section>
 
-      <section>
-        <h3 className="section-title">课程作品说明</h3>
-        <article className="card intro-card">
-          <p>这是我的课程作品，APP 名称为“珅玉定制”。命名缘由是名字中“珅”本身也是一种玉石。</p>
-          <p>
-            <strong>学号：</strong>2352396
-            <br />
-            <strong>姓名：</strong>禹尧珅
-          </p>
-          <p>本应用支持参数化定制、生图、灵感寓意生成、历史记录与收藏管理。</p>
-        </article>
+      <section className="card intro-card">
+        <h3 className="section-title">我的课程大作业作品说明</h3>
+        <p>本作品是课程《中国玉石与玉文化鉴赏》的大作业，主题为“珅玉定制”交互系统。</p>
+        <p>系统支持用户注册登录、专属参数定制、AI 生成设计思路与设计图，并展示成品卡片。</p>
+        <p>作品还提供历史记录与收藏管理、额度与充值机制、账号设置等完整交互流程。</p>
+        <p>学号：2352396 ｜ 姓名：禹尧珅。</p>
       </section>
     </>
   );
@@ -402,14 +680,16 @@ export default function App() {
       <header className="top-bar">
         <h1 className="title-lg">珅玉定制</h1>
       </header>
-      <p className="muted">参数将进入大模型提示词，影响最终设计效果</p>
+      <p className="muted">参数将进入大模型提示词，影响最终效果</p>
 
       <section className="card form-table">
         <label className="row-field">
           材质
           <select value={custom.material} onChange={(e) => setCustom((c) => ({ ...c, material: e.target.value }))}>
             {options.material.map((v) => (
-              <option key={v} value={v}>{v}</option>
+              <option key={v} value={v}>
+                {v}
+              </option>
             ))}
           </select>
         </label>
@@ -417,7 +697,9 @@ export default function App() {
           纹饰
           <select value={custom.pattern} onChange={(e) => setCustom((c) => ({ ...c, pattern: e.target.value }))}>
             {options.pattern.map((v) => (
-              <option key={v} value={v}>{v}</option>
+              <option key={v} value={v}>
+                {v}
+              </option>
             ))}
           </select>
         </label>
@@ -425,7 +707,9 @@ export default function App() {
           样式
           <select value={custom.form} onChange={(e) => setCustom((c) => ({ ...c, form: e.target.value }))}>
             {options.form.map((v) => (
-              <option key={v} value={v}>{v}</option>
+              <option key={v} value={v}>
+                {v}
+              </option>
             ))}
           </select>
         </label>
@@ -433,7 +717,9 @@ export default function App() {
           色系/风格
           <select value={custom.color} onChange={(e) => setCustom((c) => ({ ...c, color: e.target.value }))}>
             {options.color.map((v) => (
-              <option key={v} value={v}>{v}</option>
+              <option key={v} value={v}>
+                {v}
+              </option>
             ))}
           </select>
         </label>
@@ -452,19 +738,15 @@ export default function App() {
           value={custom.budget}
           onChange={(e) => setCustom((c) => ({ ...c, budget: Number(e.target.value) }))}
         />
-        <div className="row-between muted tiny">
-          <span>¥500</span>
-          <span>¥10000+</span>
-        </div>
       </section>
 
       <section className="card">
         <label className="row-field">
-          定制主体
+          送给的对象
           <input
-            value={custom.subject}
-            onChange={(e) => setCustom((c) => ({ ...c, subject: e.target.value }))}
-            placeholder="如：山海神龙守护"
+            value={custom.recipient}
+            onChange={(e) => setCustom((c) => ({ ...c, recipient: e.target.value }))}
+            placeholder="如：妈妈、男朋友、导师"
           />
         </label>
         <label className="row-field">
@@ -478,7 +760,7 @@ export default function App() {
       </section>
 
       <button type="button" className="btn btn-primary" onClick={handleGenerate} disabled={loadingGenerate}>
-        {loadingGenerate ? "生成中，请稍候..." : "生成成品卡片"}
+        {loadingGenerate ? "生成中，请稍候..." : "立即生成成品"}
       </button>
     </>
   );
@@ -488,14 +770,27 @@ export default function App() {
       <header className="top-bar">
         <h1 className="title-lg">成品</h1>
       </header>
-      <p className="muted">生成结果与账号绑定，历史记录与收藏互通</p>
+      <p className="muted">生成结果与账号绑定，历史与收藏隔离</p>
       <section className="product-wrap">
-        <ProductCard work={currentWork} />
+        <ProductCard
+          work={
+            currentWork || {
+              id: "pending",
+              name: "作品生成中",
+              detailInspo: "正在生成设计灵感...",
+              detailMeaning: "正在生成寓意说明...",
+              image: jadeImages[0],
+              grade: "--",
+            }
+          }
+        />
       </section>
       <button type="button" className="btn btn-primary" onClick={handleFavorite}>
         {favorites.some((x) => x.id === currentWork?.id) ? "取消收藏" : "收藏"}
       </button>
-      <button type="button" className="btn btn-ghost" onClick={() => navTo("custom")}>再次编辑</button>
+      <button type="button" className="btn btn-ghost" onClick={() => navTo("custom")}>
+        再次编辑
+      </button>
     </>
   );
 
@@ -503,37 +798,116 @@ export default function App() {
     <>
       <header className="top-bar">
         <h1 className="title-lg">我的</h1>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => {
-            localStorage.removeItem("yushi_token");
-            setToken("");
-            setProfile(null);
-          }}
-        >
-          退出
-        </button>
+        <div className="top-actions">
+          <button type="button" className="gear-btn" onClick={() => navTo("settings")} aria-label="打开设置">
+            ⚙
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={async () => {
+              await supabase.auth.signOut();
+            }}
+          >
+            退出
+          </button>
+        </div>
       </header>
 
       <section className="card profile-card">
-        <div className="avatar">YS</div>
+        <div className="avatar">{(profile?.nickname || "玉").slice(0, 1).toUpperCase()}</div>
         <div>
-          <p><strong>昵称：</strong>{profile?.nickname || "-"}</p>
-          <p><strong>邮箱：</strong>{profile?.email || "-"}</p>
-          <p><strong>额度：</strong><span className="value-mono">{quotaText}</span></p>
+          <p>
+            <strong>昵称：</strong>
+            {profile?.nickname || "-"}
+          </p>
+          <p>
+            <strong>邮箱：</strong>
+            {profile?.email || user.email || "-"}
+          </p>
+          <p>
+            <strong>额度：</strong>
+            <span className="value-mono">{quotaText}</span>
+          </p>
         </div>
       </section>
 
       <section className="profile-grid">
         <button type="button" className="quick-card" onClick={() => navTo("recharge")}>
-          <span className="icon">¥</span><span>充值</span><small>点击进入</small>
+          <span className="icon">¥</span>
+          <span>充值</span>
+          <small>点击进入</small>
         </button>
         <button type="button" className="quick-card" onClick={() => navTo("history-list")}>
-          <span className="icon">◷</span><span>历史记录</span><small>点击进入</small>
+          <span className="icon">◷</span>
+          <span>历史记录</span>
+          <small>点击进入</small>
         </button>
         <button type="button" className="quick-card" onClick={() => navTo("favorites-list")}>
-          <span className="icon">★</span><span>收藏</span><small>点击进入</small>
+          <span className="icon">★</span>
+          <span>收藏</span>
+          <small>点击进入</small>
+        </button>
+      </section>
+    </>
+  );
+
+  const renderSettings = () => (
+    <>
+      <header className="sub-top">
+        <button type="button" className="back" onClick={navBack}>
+          ← 返回
+        </button>
+        <h1>账号设置</h1>
+      </header>
+
+      <section className="card form-table">
+        <h3 className="section-title">修改昵称</h3>
+        <label className="row-field">
+          新昵称
+          <input
+            value={profileEdit.nickname}
+            onChange={(e) => setProfileEdit((s) => ({ ...s, nickname: e.target.value }))}
+            placeholder="昵称不能重复"
+          />
+        </label>
+        <button type="button" className="btn btn-primary" onClick={handleUpdateNickname}>
+          保存昵称
+        </button>
+      </section>
+
+      <section className="card form-table">
+        <h3 className="section-title">修改密码</h3>
+        <label className="row-field">
+          旧密码
+          <input
+            type="password"
+            value={profileEdit.oldPassword}
+            onChange={(e) => setProfileEdit((s) => ({ ...s, oldPassword: e.target.value }))}
+            placeholder="请输入旧密码"
+          />
+        </label>
+        <label className="row-field">
+          新密码
+          <input
+            type="password"
+            value={profileEdit.newPassword}
+            onChange={(e) => setProfileEdit((s) => ({ ...s, newPassword: e.target.value }))}
+            placeholder="请输入新密码"
+          />
+        </label>
+        <label className="row-field">
+          确认新密码
+          <input
+            type="password"
+            value={profileEdit.confirmNewPassword}
+            onChange={(e) => setProfileEdit((s) => ({ ...s, confirmNewPassword: e.target.value }))}
+            placeholder="请再次输入新密码"
+          />
+        </label>
+        <p className="muted tiny">新密码至少 8 位，且必须包含大小写字母、数字和符号。</p>
+        <button type="button" className="btn btn-primary" onClick={handleChangePassword}>
+          提交密码修改
         </button>
       </section>
     </>
@@ -542,10 +916,11 @@ export default function App() {
   const renderRecharge = () => (
     <>
       <header className="sub-top">
-        <button type="button" className="back" onClick={navBack}>← 返回</button>
+        <button type="button" className="back" onClick={navBack}>
+          ← 返回
+        </button>
         <h1>充值</h1>
       </header>
-      <p className="muted">选择支付方式与套餐（当前为模拟支付流程）</p>
 
       <section className="pay-methods">
         <button
@@ -553,14 +928,16 @@ export default function App() {
           className={`pay-method wechat ${payMethod === "wechat" ? "active" : ""}`}
           onClick={() => setPayMethod("wechat")}
         >
-          <span className="icon">微</span><span>微信支付</span>
+          <span className="icon">微</span>
+          <span>微信支付</span>
         </button>
         <button
           type="button"
           className={`pay-method alipay ${payMethod === "alipay" ? "active" : ""}`}
           onClick={() => setPayMethod("alipay")}
         >
-          <span className="icon">支</span><span>支付宝</span>
+          <span className="icon">支</span>
+          <span>支付宝</span>
         </button>
       </section>
 
@@ -593,30 +970,70 @@ export default function App() {
         </label>
       </section>
 
-      <button type="button" className="btn btn-primary" onClick={handlePay}>立即支付</button>
+      <button type="button" className="btn btn-primary" onClick={handlePay}>
+        立即支付
+      </button>
     </>
   );
 
-  const renderListPage = (title, tip, list, onOpen) => (
+  const renderListPage = (title, tip, list, onOpen, onDelete) => (
     <>
       <header className="sub-top">
-        <button type="button" className="back" onClick={navBack}>← 返回</button>
+        <button type="button" className="back" onClick={navBack}>
+          ← 返回
+        </button>
         <h1>{title}</h1>
       </header>
 
       <p className="muted">{tip}</p>
       <section className="list-stack">
         {list.map((item) => (
-          <button key={item.id} type="button" className="record-item" onClick={() => onOpen(item.id)}>
-            <div className="thumb"><img src={item.image} alt={item.name} /></div>
-            <div>
-              <h4>{item.name}</h4>
-              <p>寓意：{item.detailMeaning}</p>
-            </div>
-          </button>
+          <article key={item.id} className="record-item">
+            <button type="button" className="record-open" onClick={() => onOpen(item.id)}>
+              <div className="thumb">
+                <img src={item.image} alt={item.name} />
+              </div>
+              <div>
+                <h4>{item.name}</h4>
+                <p>寓意：{item.detailMeaning}</p>
+              </div>
+            </button>
+            <button type="button" className="record-delete" onClick={() => onDelete(item.id)}>
+              删除
+            </button>
+          </article>
         ))}
       </section>
     </>
+  );
+
+  const renderGeneratingOverlay = () => (
+    <section className="generate-overlay" aria-live="polite">
+      <div className="overlay-panel">
+        <h3>正在生成成品</h3>
+        <p>{generatePhase === "plan" ? "正在生成设计思路..." : "正在生成设计图..."}</p>
+
+        <div className="progress-item">
+          <div className="row-between">
+            <span>设计方案生成中</span>
+            <strong>{Math.round(generateProgress.plan)}%</strong>
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${Math.round(generateProgress.plan)}%` }} />
+          </div>
+        </div>
+
+        <div className="progress-item">
+          <div className="row-between">
+            <span>设计图生成中</span>
+            <strong>{Math.round(generateProgress.image)}%</strong>
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${Math.round(generateProgress.image)}%` }} />
+          </div>
+        </div>
+      </div>
+    </section>
   );
 
   const historyDetail = history.find((x) => x.id === selectedHistoryId) || history[0];
@@ -630,21 +1047,31 @@ export default function App() {
     if (page === "custom") content = renderCustom();
     if (page === "product") content = renderProduct();
     if (page === "profile") content = renderProfile();
+    if (page === "settings") content = renderSettings();
     if (page === "recharge") content = renderRecharge();
     if (page === "history-list") {
       content = renderListPage("历史记录", "点击条目查看详情", history, (id) => {
         setSelectedHistoryId(id);
         navTo("history-detail");
-      });
+      }, handleDeleteHistory);
     }
     if (page === "history-detail") {
       content = (
         <>
           <header className="sub-top">
-            <button type="button" className="back" onClick={navBack}>← 返回</button>
+            <button type="button" className="back" onClick={navBack}>
+              ← 返回
+            </button>
             <h1>历史记录详情</h1>
           </header>
-          <section className="product-wrap"><ProductCard work={historyDetail} /></section>
+          <section className="product-wrap">
+            <ProductCard work={historyDetail} />
+          </section>
+          {historyDetail ? (
+            <button type="button" className="btn btn-ghost" onClick={() => handleDeleteHistory(historyDetail.id)}>
+              删除这条历史
+            </button>
+          ) : null}
         </>
       );
     }
@@ -652,16 +1079,25 @@ export default function App() {
       content = renderListPage("我的收藏", "点击收藏条目查看详情", favorites, (id) => {
         setSelectedFavoriteId(id);
         navTo("favorites-detail");
-      });
+      }, handleDeleteFavorite);
     }
     if (page === "favorites-detail") {
       content = (
         <>
           <header className="sub-top">
-            <button type="button" className="back" onClick={navBack}>← 返回</button>
+            <button type="button" className="back" onClick={navBack}>
+              ← 返回
+            </button>
             <h1>收藏详情</h1>
           </header>
-          <section className="product-wrap"><ProductCard work={favoriteDetail} /></section>
+          <section className="product-wrap">
+            <ProductCard work={favoriteDetail} />
+          </section>
+          {favoriteDetail ? (
+            <button type="button" className="btn btn-ghost" onClick={() => handleDeleteFavorite(favoriteDetail.id)}>
+              删除这条收藏
+            </button>
+          ) : null}
         </>
       );
     }
@@ -670,11 +1106,22 @@ export default function App() {
   return (
     <main className="app-shell">
       <section className="app">
-        <section className="screen">
-          {error ? <p className="muted" style={{ color: "#dc2626" }}>{error}</p> : null}
+        <section className={`screen ${loadingGenerate && page === "product" ? "is-generating" : ""}`}>
+          {error ? (
+            <p className="muted" style={{ color: "#dc2626" }}>
+              {error}
+            </p>
+          ) : null}
           {content}
+          {loadingGenerate && page === "product" ? renderGeneratingOverlay() : null}
         </section>
         {["home", "custom", "product", "profile"].includes(page) && <Tabbar page={page} onNav={setPage} />}
+        {island.visible ? (
+          <div className="island-toast" role="status" aria-live="polite">
+            <span className="island-check">✓</span>
+            <span>{island.message}</span>
+          </div>
+        ) : null}
       </section>
     </main>
   );

@@ -6,9 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "supabase:link": "npx supabase link --project-ref yclkwilangwsmnnpqmwc",
+    "supabase:deploy:functions": "npx supabase functions deploy generate-work --no-verify-jwt && npx supabase functions deploy create-order --no-verify-jwt && npx supabase functions deploy signup-user --no-verify-jwt"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

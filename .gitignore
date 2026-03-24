@@ -33,3 +33,6 @@ android/.idea/
 # Netlify local metadata
 .netlify/
 .netlify_site_name_tmp
+
+# Supabase local temp metadata
+supabase/.temp/
