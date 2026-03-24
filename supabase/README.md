@@ -61,6 +61,11 @@ This deploys:
 - `generate-work`
 - `create-order`
 - `signup-user` (JWT verification disabled to allow pre-login registration)
+- `admin-dashboard`
+- `review-application`
+- `publish-notice`
+- `admin-delete-user`
+- `admin-delete-notice`
 
 Note: all functions are deployed with `--no-verify-jwt` at gateway level, but each function performs auth checks internally via `Authorization` header and `supabase.auth.getUser()`. This avoids gateway-side `Invalid JWT` false negatives while keeping business actions protected.
 
@@ -76,4 +81,6 @@ Set in Netlify site settings:
 1. Register a normal account (directly signs in, no email confirmation dependency, starts with 5 free quota).
 2. Register/login `3492675568@qq.com` (should be admin with unlimited quota).
 3. Generate once and verify history/favorites are account-isolated.
-4. Verify recharge updates quota correctly.
+4. Submit quota application from user page (`10/100/1000` options).
+5. Open `/admin` with admin account, approve/reject applications, publish notice.
+6. Verify user side receives notice and approval status updates.

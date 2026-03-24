@@ -24,6 +24,13 @@ function formatBudget(v) {
   return v >= 10000 ? "¥10000+" : `¥${v}`;
 }
 
+function formatTime(value) {
+  if (!value) return "-";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "-";
+  return d.toLocaleString("zh-CN", { hour12: false });
+}
+
 function mapWork(item) {
   return {
     id: item.id,
@@ -152,6 +159,11 @@ function Tabbar({ page, onNav }) {
 }
 
 export default function App() {
+  const pathname = typeof window !== "undefined" ? window.location.pathname : "/";
+  const isAdminRoute = pathname.startsWith("/admin");
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
   const [page, setPage] = useState("home");
   const [stack, setStack] = useState([]);
   const [session, setSession] = useState(null);
@@ -164,18 +176,28 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [favorites, setFavorites] = useState([]);
   const [currentWork, setCurrentWork] = useState(null);
-  const [packages, setPackages] = useState([]);
+  const [applications, setApplications] = useState([]);
+  const [notices, setNotices] = useState([]);
 
   const [loadingAuth, setLoadingAuth] = useState(false);
   const [loadingGenerate, setLoadingGenerate] = useState(false);
   const [generatePhase, setGeneratePhase] = useState("idle");
   const [generateProgress, setGenerateProgress] = useState({ plan: 0, image: 0 });
   const [loadingData, setLoadingData] = useState(false);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
   const [error, setError] = useState("");
   const [island, setIsland] = useState({ visible: false, message: "" });
-  const [payMethod, setPayMethod] = useState("wechat");
-  const [selectedPackage, setSelectedPackage] = useState("pkg_9_9");
-  const [customTimes, setCustomTimes] = useState(100);
+  const [applyTimes, setApplyTimes] = useState(100);
+  const [applyCustomTimes, setApplyCustomTimes] = useState("");
+  const [applyMessage, setApplyMessage] = useState("");
+  const [adminPayload, setAdminPayload] = useState({ users: [], applications: [], notices: [] });
+  const [reviewNote, setReviewNote] = useState("");
+  const [noticeDraft, setNoticeDraft] = useState({ title: "", content: "" });
+  const [adminForm, setAdminForm] = useState({ email: "", password: "" });
+  const [adminToken, setAdminToken] = useState("");
+  const [adminMenu, setAdminMenu] = useState("approvals");
+  const [adminLoginLoading, setAdminLoginLoading] = useState(false);
+  const [adminError, setAdminError] = useState("");
 
   const [custom, setCustom] = useState({
     material: "翡翠",
@@ -245,6 +267,84 @@ export default function App() {
     }
   };
 
+  const adminInvoke = useCallback(async (functionName, body = {}) => {
+    if (!adminToken) throw new Error("请先登录管理员账户");
+    const resp = await fetch(`${supabaseUrl}/functions/v1/${functionName}`, {
+      method: "POST",
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${adminToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    const raw = await resp.text();
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!resp.ok) throw new Error(parsed?.message || `请求失败(${resp.status})`);
+    return parsed;
+  }, [adminToken]);
+
+  const handleAdminLogin = async () => {
+    setAdminError("");
+    setAdminLoginLoading(true);
+    try {
+      const email = adminForm.email.trim();
+      const password = adminForm.password;
+      const resp = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: {
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${supabaseAnonKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email, password }),
+      });
+      const raw = await resp.text();
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (!resp.ok || !parsed?.access_token) {
+        throw new Error(parsed?.msg || parsed?.error_description || "管理员登录失败");
+      }
+
+      const token = parsed.access_token;
+      const dashResp = await fetch(`${supabaseUrl}/functions/v1/admin-dashboard`, {
+        method: "POST",
+        headers: {
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      const dashRaw = await dashResp.text();
+      const dashData = dashRaw ? JSON.parse(dashRaw) : {};
+      if (!dashResp.ok) {
+        throw new Error(dashData?.message || "你不是管理员或后台不可用");
+      }
+
+      setAdminToken(token);
+      setAdminPayload({
+        users: dashData?.users || [],
+        applications: dashData?.applications || [],
+        notices: dashData?.notices || [],
+      });
+      setAdminForm((prev) => ({ ...prev, password: "" }));
+      showIsland("管理员登录成功");
+    } catch (e) {
+      setAdminError(e?.message || "管理员登录失败");
+    } finally {
+      setAdminLoginLoading(false);
+    }
+  };
+
+  const handleAdminLogout = () => {
+    setAdminToken("");
+    setAdminPayload({ users: [], applications: [], notices: [] });
+    setReviewNote("");
+    setNoticeDraft({ title: "", content: "" });
+    setAdminForm((prev) => ({ ...prev, password: "" }));
+  };
+
   const loadUserData = useCallback(async (u) => {
     if (!u) return;
     setLoadingData(true);
@@ -289,15 +389,24 @@ export default function App() {
       const mappedFav = (favRows || []).map((row) => mapWork(row.works));
       setFavorites(mappedFav);
 
-      const { data: pkgRows, error: pkgErr } = await supabase
-        .from("recharge_packages")
-        .select("id,name,amount,times")
-        .eq("active", true)
-        .order("amount", { ascending: true });
-      if (pkgErr) throw pkgErr;
+      const { data: appRows, error: appErr } = await supabase
+        .from("quota_applications")
+        .select("id,requested_times,status,review_note,created_at,reviewed_at")
+        .eq("user_id", u.id)
+        .order("created_at", { ascending: false })
+        .limit(20);
+      if (appErr) throw appErr;
 
-      setPackages(pkgRows || []);
-      if (pkgRows?.length) setSelectedPackage(pkgRows[0].id);
+      const { data: noticeRows, error: noticeErr } = await supabase
+        .from("notices")
+        .select("id,title,content,created_at")
+        .eq("active", true)
+        .order("created_at", { ascending: false })
+        .limit(10);
+      if (noticeErr) throw noticeErr;
+
+      setApplications(appRows || []);
+      setNotices(noticeRows || []);
       if (mappedHistory.length && !currentWork) setCurrentWork(mappedHistory[0]);
     } catch (e) {
       setError(e?.message || "加载失败");
@@ -336,6 +445,9 @@ export default function App() {
         setProfile(null);
         setHistory([]);
         setFavorites([]);
+        setApplications([]);
+        setNotices([]);
+        setAdminPayload({ users: [], applications: [], notices: [] });
         setCurrentWork(null);
         setPage("home");
         setStack([]);
@@ -596,22 +708,115 @@ export default function App() {
     }
   };
 
-  const handlePay = async () => {
+  const handleApplyQuota = async () => {
+    if (!user) return;
+    const times = Number(applyTimes);
+    if (!Number.isInteger(times) || times <= 0 || times > 10000) {
+      setError("申请额度需为 1~10000 的整数");
+      return;
+    }
     setError("");
     try {
-      const { error: invokeError } = await supabase.functions.invoke("create-order", {
-        body: {
-          packageId: selectedPackage,
-          payChannel: payMethod,
-          customTimes,
-        },
+      const { error: insertErr } = await supabase.from("quota_applications").insert({
+        user_id: user.id,
+        requested_times: times,
+        status: "pending",
       });
-      if (invokeError) throw invokeError;
+      if (insertErr) throw insertErr;
+      setApplyMessage("申请已提交，请等待管理员审批");
+      showIsland("申请提交成功");
       await loadUserData(user);
-      navBack();
     } catch (e) {
-      setError(e?.message || "充值失败");
+      setError(e?.message || "申请提交失败");
     }
+  };
+
+  const loadAdminDashboard = useCallback(async () => {
+    if (!adminToken) return;
+    setLoadingAdmin(true);
+    setAdminError("");
+    try {
+      const data = await adminInvoke("admin-dashboard", {});
+      setAdminPayload({
+        users: data?.users || [],
+        applications: data?.applications || [],
+        notices: data?.notices || [],
+      });
+    } catch (e) {
+      setAdminError(e?.message || "后台数据加载失败");
+    } finally {
+      setLoadingAdmin(false);
+    }
+  }, [adminInvoke, adminToken]);
+
+  useEffect(() => {
+    if (!isAdminRoute || !adminToken) return;
+    void loadAdminDashboard();
+  }, [isAdminRoute, adminToken, loadAdminDashboard]);
+
+  const handleReviewApplication = async (applicationId, decision) => {
+    setAdminError("");
+    try {
+      await adminInvoke("review-application", {
+        applicationId,
+        decision,
+        reviewNote,
+      });
+      setReviewNote("");
+      showIsland(decision === "approved" ? "审批已通过" : "审批已驳回");
+      await loadAdminDashboard();
+      await loadUserData(user);
+    } catch (e) {
+      setAdminError(e?.message || "审批失败");
+    }
+  };
+
+  const handlePublishNotice = async () => {
+    setAdminError("");
+    try {
+      await adminInvoke("publish-notice", {
+        title: noticeDraft.title,
+        content: noticeDraft.content,
+        active: true,
+      });
+      setNoticeDraft({ title: "", content: "" });
+      showIsland("通知已发布");
+      await loadAdminDashboard();
+      await loadUserData(user);
+    } catch (e) {
+      setAdminError(e?.message || "通知发布失败");
+    }
+  };
+
+  const handleAdminDeleteUser = async (targetUserId) => {
+    if (!window.confirm("确定删除该用户吗？删除后不可恢复。")) return;
+    setAdminError("");
+    try {
+      await adminInvoke("admin-delete-user", { targetUserId });
+      showIsland("用户已删除");
+      await loadAdminDashboard();
+    } catch (e) {
+      setAdminError(e?.message || "删除用户失败");
+    }
+  };
+
+  const handleAdminDeleteNotice = async (noticeId) => {
+    if (!window.confirm("确定删除这条公告吗？")) return;
+    setAdminError("");
+    try {
+      await adminInvoke("admin-delete-notice", { noticeId });
+      showIsland("公告已删除");
+      await loadAdminDashboard();
+      await loadUserData(user);
+    } catch (e) {
+      setAdminError(e?.message || "删除公告失败");
+    }
+  };
+
+  const handlePay = async () => {
+    setError("");
+    setApplyMessage("");
+    await handleApplyQuota();
   };
 
   const quotaText = useMemo(() => {
@@ -620,7 +825,7 @@ export default function App() {
     return `免费总计 ${profile.quotaTotal} 次（剩余 ${profile.quotaRemaining} 次）`;
   }, [profile]);
 
-  if (!user) {
+  if (!isAdminRoute && !user) {
     return (
       <main className="app-shell">
         <section className="app">
@@ -669,7 +874,7 @@ export default function App() {
         <h3 className="section-title">我的课程大作业作品说明</h3>
         <p>本作品是课程《中国玉石与玉文化鉴赏》的大作业，主题为“珅玉定制”交互系统。</p>
         <p>系统支持用户注册登录、专属参数定制、AI 生成设计思路与设计图，并展示成品卡片。</p>
-        <p>作品还提供历史记录与收藏管理、额度与充值机制、账号设置等完整交互流程。</p>
+        <p>作品还提供历史记录与收藏管理、额度申请与审批通知、账号设置等完整交互流程。</p>
         <p>学号：2352396 ｜ 姓名：禹尧珅。</p>
       </section>
     </>
@@ -833,9 +1038,9 @@ export default function App() {
       </section>
 
       <section className="profile-grid">
-        <button type="button" className="quick-card" onClick={() => navTo("recharge")}>
-          <span className="icon">¥</span>
-          <span>充值</span>
+        <button type="button" className="quick-card" onClick={() => navTo("apply-quota")}>
+          <span className="icon">+</span>
+          <span>申请额度</span>
           <small>点击进入</small>
         </button>
         <button type="button" className="quick-card" onClick={() => navTo("history-list")}>
@@ -848,6 +1053,29 @@ export default function App() {
           <span>收藏</span>
           <small>点击进入</small>
         </button>
+      </section>
+
+      <section className="card form-table">
+        <h3 className="section-title">消息通知</h3>
+        {notices.slice(0, 3).map((n) => (
+          <article key={n.id} className="notice-item">
+            <h4>{n.title}</h4>
+            <p>{n.content}</p>
+            <p className="muted tiny">发布时间：{formatTime(n.created_at)}</p>
+          </article>
+        ))}
+        {applications.slice(0, 3).map((a) => (
+          <article key={a.id} className="notice-item">
+            <h4>额度申请 · {a.requested_times} 次</h4>
+            <p>
+              状态：
+              {a.status === "pending" ? "待审批" : a.status === "approved" ? "已批准" : "已驳回"}
+              {a.review_note ? `（${a.review_note}）` : ""}
+            </p>
+            <p className="muted tiny">申请时间：{formatTime(a.created_at)} ｜ 审批时间：{formatTime(a.reviewed_at)}</p>
+          </article>
+        ))}
+        {!notices.length && !applications.length ? <p className="muted">暂无通知</p> : null}
       </section>
     </>
   );
@@ -913,68 +1141,197 @@ export default function App() {
     </>
   );
 
-  const renderRecharge = () => (
+  const renderApplyQuota = () => (
     <>
       <header className="sub-top">
         <button type="button" className="back" onClick={navBack}>
           ← 返回
         </button>
-        <h1>充值</h1>
+        <h1>申请额度</h1>
       </header>
 
-      <section className="pay-methods">
-        <button
-          type="button"
-          className={`pay-method wechat ${payMethod === "wechat" ? "active" : ""}`}
-          onClick={() => setPayMethod("wechat")}
-        >
-          <span className="icon">微</span>
-          <span>微信支付</span>
-        </button>
-        <button
-          type="button"
-          className={`pay-method alipay ${payMethod === "alipay" ? "active" : ""}`}
-          onClick={() => setPayMethod("alipay")}
-        >
-          <span className="icon">支</span>
-          <span>支付宝</span>
-        </button>
-      </section>
-
-      <h3 className="section-title">套餐</h3>
-      <section className="package-row">
-        {packages.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={`package-card ${selectedPackage === item.id ? "active" : ""}`}
-            onClick={() => setSelectedPackage(item.id)}
-          >
-            <span className="price">¥{item.amount}</span>
-            <span className="times">{item.times} 次</span>
-          </button>
-        ))}
-      </section>
-
-      <section className="card">
-        <h4>自定义续费（¥0.1 / 次）</h4>
+      <section className="card form-table">
+        <h4>申请额度</h4>
+        <div className="quota-option-grid">
+          {[10, 100, 1000].map((n) => (
+            <button
+              key={n}
+              type="button"
+              className={`quota-option ${applyTimes === n ? "active" : ""}`}
+              onClick={() => {
+                setApplyTimes(n);
+                setApplyCustomTimes("");
+              }}
+            >
+              <span className="price">{n}</span>
+              <span className="times">次</span>
+            </button>
+          ))}
+        </div>
         <label className="row-field">
-          续费次数
+          自定义额度
           <input
             type="number"
             min="1"
+            max="10000"
             step="1"
-            value={customTimes}
-            onChange={(e) => setCustomTimes(Math.max(1, Number(e.target.value || 1)))}
+            value={applyCustomTimes}
+            onChange={(e) => {
+              const v = e.target.value;
+              setApplyCustomTimes(v);
+              const n = Number(v);
+              if (Number.isInteger(n) && n > 0) setApplyTimes(n);
+            }}
+            placeholder="输入 1-10000 的整数"
           />
         </label>
+        <p className="muted">提交后将进入管理员审批队列，审批通过后自动增加可用额度。</p>
       </section>
 
       <button type="button" className="btn btn-primary" onClick={handlePay}>
-        立即支付
+        提交申请
       </button>
+      {applyMessage ? <p className="muted accent">{applyMessage}</p> : null}
+
+      <section className="card form-table">
+        <h3 className="section-title">我的审批状态</h3>
+        {applications.slice(0, 8).map((a) => (
+          <article key={a.id} className="notice-item">
+            <h4>{a.requested_times} 次额度申请</h4>
+            <p>
+              状态：
+              {a.status === "pending" ? "待审批" : a.status === "approved" ? "已批准" : "已驳回"}
+              {a.review_note ? `（${a.review_note}）` : ""}
+            </p>
+            <p className="muted tiny">申请时间：{formatTime(a.created_at)} ｜ 审批时间：{formatTime(a.reviewed_at)}</p>
+          </article>
+        ))}
+      </section>
     </>
   );
+
+  const renderAdmin = () => {
+    if (!adminToken) {
+      return (
+        <main className="admin-shell">
+          <section className="admin-login-card card form-table">
+            <h1 className="title-lg">管理员登录</h1>
+            <p className="muted">管理后台与用户系统分离，仅支持管理员账号登录。</p>
+            <label className="row-field">
+              管理员邮箱
+              <input
+                value={adminForm.email}
+                onChange={(e) => setAdminForm((s) => ({ ...s, email: e.target.value }))}
+                placeholder="请输入管理员邮箱"
+              />
+            </label>
+            <label className="row-field">
+              密码
+              <input
+                type="password"
+                value={adminForm.password}
+                onChange={(e) => setAdminForm((s) => ({ ...s, password: e.target.value }))}
+                placeholder="请输入密码"
+              />
+            </label>
+            <button type="button" className="btn btn-primary" disabled={adminLoginLoading} onClick={handleAdminLogin}>
+              {adminLoginLoading ? "登录中..." : "登录后台"}
+            </button>
+            {adminError ? <p className="muted" style={{ color: "#dc2626" }}>{adminError}</p> : null}
+          </section>
+        </main>
+      );
+    }
+
+    const pendingApps = (adminPayload.applications || []).filter((a) => a.status === "pending");
+    const adminUserMap = new Map((adminPayload.users || []).map((u) => [u.id, u]));
+
+    return (
+      <main className="admin-shell">
+        <section className="admin-layout">
+          <aside className="admin-sidebar">
+            <h2>珅玉管理后台</h2>
+            <button type="button" className={`admin-menu-btn ${adminMenu === "approvals" ? "active" : ""}`} onClick={() => setAdminMenu("approvals")}>事项审批</button>
+            <button type="button" className={`admin-menu-btn ${adminMenu === "users" ? "active" : ""}`} onClick={() => setAdminMenu("users")}>用户管理</button>
+            <button type="button" className={`admin-menu-btn ${adminMenu === "notices" ? "active" : ""}`} onClick={() => setAdminMenu("notices")}>公告发布</button>
+            <button type="button" className="btn btn-ghost" onClick={handleAdminLogout}>退出后台</button>
+          </aside>
+
+          <section className="admin-main">
+            <header className="admin-topbar">
+            <h1>{adminMenu === "approvals" ? "事项审批" : adminMenu === "users" ? "用户管理" : "公告发布"}</h1>
+            <button type="button" className="btn btn-ghost" onClick={() => void loadAdminDashboard()}>刷新数据</button>
+          </header>
+            {loadingAdmin ? <p className="muted">加载中...</p> : null}
+            {adminError ? <p className="muted" style={{ color: "#dc2626" }}>{adminError}</p> : null}
+
+            {adminMenu === "approvals" ? (
+              <section className="card form-table">
+                <h3 className="section-title">待审批申请</h3>
+                <label className="row-field">
+                  审批备注（可选）
+                  <input value={reviewNote} onChange={(e) => setReviewNote(e.target.value)} placeholder="如：请补充用途说明" />
+                </label>
+                {pendingApps.map((a) => (
+                  <article key={a.id} className="record-item">
+                    <div>
+                      <h4>{adminUserMap.get(a.user_id)?.nickname || "用户"}（{adminUserMap.get(a.user_id)?.email || "-"}）</h4>
+                      <p>申请额度：{a.requested_times} 次</p>
+                      <p className="muted tiny">申请时间：{formatTime(a.created_at)} ｜ 审批时间：{formatTime(a.reviewed_at)}</p>
+                    </div>
+                    <div className="admin-actions-inline">
+                      <button type="button" className="btn btn-primary" onClick={() => handleReviewApplication(a.id, "approved")}>批准</button>
+                      <button type="button" className="btn btn-ghost" onClick={() => handleReviewApplication(a.id, "rejected")}>驳回</button>
+                    </div>
+                  </article>
+                ))}
+                {!pendingApps.length ? <p className="muted">暂无待审批申请</p> : null}
+              </section>
+            ) : null}
+
+            {adminMenu === "users" ? (
+              <section className="card form-table">
+                <h3 className="section-title">用户管理（可删除）</h3>
+                {(adminPayload.users || []).map((u) => (
+                  <article key={u.id} className="record-item">
+                    <div>
+                      <h4>{u.nickname}（{u.email}）</h4>
+                      <p>剩余额度：{u.quota_remaining} 次（总 {u.quota_total} / 已用 {u.quota_used}）</p>
+                    </div>
+                    <button type="button" className="record-delete" onClick={() => handleAdminDeleteUser(u.id)}>删除用户</button>
+                  </article>
+                ))}
+              </section>
+            ) : null}
+
+            {adminMenu === "notices" ? (
+              <section className="card form-table">
+                <h3 className="section-title">发布公告</h3>
+                <label className="row-field">
+                  标题
+                  <input value={noticeDraft.title} onChange={(e) => setNoticeDraft((s) => ({ ...s, title: e.target.value }))} placeholder="请输入通知标题" />
+                </label>
+                <label className="row-field">
+                  内容
+                  <input value={noticeDraft.content} onChange={(e) => setNoticeDraft((s) => ({ ...s, content: e.target.value }))} placeholder="请输入通知内容" />
+                </label>
+                <button type="button" className="btn btn-primary" onClick={handlePublishNotice}>发布通知</button>
+                <h3 className="section-title">已发布公告</h3>
+                {(adminPayload.notices || []).slice(0, 20).map((n) => (
+                  <article key={n.id} className="notice-item">
+                    <h4>{n.title}</h4>
+                    <p>{n.content}</p>
+                    <p className="muted tiny">发布时间：{formatTime(n.created_at)}</p>
+                    <button type="button" className="record-delete" onClick={() => handleAdminDeleteNotice(n.id)}>删除公告</button>
+                  </article>
+                ))}
+              </section>
+            ) : null}
+          </section>
+        </section>
+      </main>
+    );
+  };
 
   const renderListPage = (title, tip, list, onOpen, onDelete) => (
     <>
@@ -1039,6 +1396,20 @@ export default function App() {
   const historyDetail = history.find((x) => x.id === selectedHistoryId) || history[0];
   const favoriteDetail = favorites.find((x) => x.id === selectedFavoriteId) || favorites[0];
 
+  if (isAdminRoute) {
+    return (
+      <>
+        {renderAdmin()}
+        {island.visible ? (
+          <div className="island-toast" role="status" aria-live="polite">
+            <span className="island-check">✓</span>
+            <span>{island.message}</span>
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
   let content = null;
   if (loadingData && !profile) {
     content = <p className="muted">加载账号数据中...</p>;
@@ -1048,7 +1419,7 @@ export default function App() {
     if (page === "product") content = renderProduct();
     if (page === "profile") content = renderProfile();
     if (page === "settings") content = renderSettings();
-    if (page === "recharge") content = renderRecharge();
+    if (page === "apply-quota") content = renderApplyQuota();
     if (page === "history-list") {
       content = renderListPage("历史记录", "点击条目查看详情", history, (id) => {
         setSelectedHistoryId(id);
