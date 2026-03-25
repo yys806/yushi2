@@ -1048,6 +1048,7 @@ export default function App() {
           material: custom.material,
           pattern: custom.pattern,
           productType: custom.form,
+          recipient: custom.recipient,
           budget: custom.budget,
           subject: `送给${recipient}的专属祝福`,
           styleHint: "",

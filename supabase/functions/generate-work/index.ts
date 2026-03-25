@@ -52,6 +52,34 @@ const disasterCombos = [
   },
 ];
 
+const recommendedCombos = [
+  {
+    material: "和田玉",
+    patterns: ["饕餮纹", "蟠螭纹", "谷纹", "蝉纹"],
+    tip: "和田玉与高古纹饰契合度高，优先做古雅、克制、博物馆级的雕刻表达。",
+  },
+  {
+    material: "翡翠",
+    patterns: ["龙纹", "缠枝纹", "云纹", "鱼纹"],
+    tip: "翡翠适合层次丰富的细节雕刻，强调通透与贵气。",
+  },
+  {
+    material: "绿松石",
+    patterns: ["饕餮纹", "云雷纹"],
+    tip: "绿松石与古青铜风纹样组合更有神秘文明感。",
+  },
+  {
+    material: "田黄",
+    patterns: ["龙纹", "云纹"],
+    tip: "田黄更适合印章或把件风格，强调温润与文人气质。",
+  },
+  {
+    material: "寿山石",
+    patterns: ["龙纹", "云纹"],
+    tip: "寿山石适合印章向构图和浅浮雕表达，突出石性温润。",
+  },
+];
+
 function json(data: Json, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -80,6 +108,13 @@ function comboWarning(material: string, pattern: string): string | null {
   return null;
 }
 
+function comboRecommendation(material: string, pattern: string): string | null {
+  for (const row of recommendedCombos) {
+    if (row.material === material && row.patterns.includes(pattern)) return row.tip;
+  }
+  return null;
+}
+
 function parseTextJson(raw: string): { inspiration?: string; meaning?: string } | null {
   const cleaned = (raw || "")
     .trim()
@@ -94,6 +129,20 @@ function parseTextJson(raw: string): { inspiration?: string; meaning?: string } 
   }
 }
 
+function parsePromptJson(raw: string): { prompt?: string; negative?: string } | null {
+  const cleaned = (raw || "")
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```/, "")
+    .replace(/```$/, "")
+    .trim();
+  try {
+    return JSON.parse(cleaned) as { prompt?: string; negative?: string };
+  } catch {
+    return null;
+  }
+}
+
 function buildPromptBundle(input: {
   material: string;
   pattern: string;
@@ -101,39 +150,136 @@ function buildPromptBundle(input: {
   styleHint: string;
   budget: number;
   subject: string;
+  recipient: string;
   customInput: string;
 }) {
   const materialPrompt = materialPrompts[input.material] ?? `${input.material}，强调真实玉石质感与高级光泽。`;
   const patternPrompt = patternPrompts[input.pattern] ?? `${input.pattern}，强调立体雕刻工艺，避免贴图感。`;
   const warning = comboWarning(input.material, input.pattern);
+  const recommendation = comboRecommendation(input.material, input.pattern);
+  const styleLabel = input.styleHint || input.productType;
+
+  const strictSubject = [
+    `A single Chinese jade ${input.productType} as the only subject`,
+    "close-up product photography",
+    "clean studio background",
+    "center composition",
+    "high detail macro texture",
+    "real carved jade craftsmanship",
+    "museum-quality object shot",
+  ].join(", ");
+
+  const strictNegative = [
+    "NO landscape",
+    "NO scenery",
+    "NO mountains",
+    "NO rivers",
+    "NO forest",
+    "NO architecture",
+    "NO city",
+    "NO people",
+    "NO animals",
+    "NO sky",
+    "NO poster",
+    "NO text watermark",
+  ].join(", ");
 
   const textBrief = [
     `材质：${input.material}`,
     `纹饰：${input.pattern}`,
-    `样式：${input.styleHint || input.productType}`,
+    `样式：${styleLabel}`,
     `成品：${input.productType}`,
+    `送给：${input.recipient}`,
     `预算：${input.budget}`,
     `主题：${input.subject}`,
     input.customInput ? `用户自定义：${input.customInput}` : "",
+    recommendation ? `推荐提示：${recommendation}` : "",
     warning ? `组合提示：${warning}` : "",
   ]
     .filter(Boolean)
     .join("；");
 
   const imagePrompt = [
-    "Chinese jade jewelry, premium craftsmanship, relief/intaglio carving, studio product photo, realistic gemstone texture",
+    strictSubject,
+    "Chinese jade jewelry, premium craftsmanship, relief/intaglio carving, realistic gemstone texture",
     `Material: ${materialPrompt}`,
     `Pattern: ${patternPrompt}`,
-    `Style: ${input.styleHint || input.productType}`,
+    `Style: ${styleLabel}`,
+    `Recipient: ${input.recipient}`,
+    "Camera: product close-up, 85mm lens look, neutral background, softbox light",
     `Budget level: ${input.budget}`,
-    `Theme: ${input.subject}`,
+    `Theme detail only as symbolic carving meaning: ${input.subject}`,
     input.customInput ? `Custom note: ${input.customInput}` : "",
+    recommendation ? `Craft direction: ${recommendation}` : "",
     warning ? `Caution: ${warning}` : "",
+    `Hard negative constraints: ${strictNegative}`,
   ]
     .filter(Boolean)
     .join(". ");
 
-  return { textBrief, imagePrompt, warning };
+  return { textBrief, imagePrompt, warning, recommendation, negativePrompt: strictNegative };
+}
+
+async function callSiliconPromptComposer(
+  apiKey: string,
+  model: string,
+  bundle: { textBrief: string; imagePrompt: string; warning: string | null; recommendation: string | null; negativePrompt: string },
+  input: { material: string; pattern: string; productType: string; styleHint: string; budget: number; subject: string; recipient: string; customInput: string }
+) {
+  if (!apiKey) {
+    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt };
+  }
+
+  const promptTask = [
+    "你是玉石产品生图提示词工程师。",
+    "任务：把用户参数和提示词库整理成最终生图提示词。",
+    "硬规则：画面里必须只有单个玉石成品（手镯/摆件/吊坠等），产品居中，棚拍背景。",
+    "硬规则：禁止风景、山川、建筑、人物、动物、天空、大场景叙事。",
+    "请只输出 JSON：{\"prompt\":\"...\",\"negative\":\"...\"}",
+    "prompt 用英文组织，negative 用英文短语列表。",
+    `材质：${input.material}`,
+    `纹饰：${input.pattern}`,
+    `成品类型：${input.productType}`,
+    `风格：${input.styleHint || input.productType}`,
+    `预算：${input.budget}`,
+    `送礼对象：${input.recipient}`,
+    `主题：${input.subject}`,
+    input.customInput ? `自定义要求：${input.customInput}` : "",
+    `纹饰+材质结构化提示：${bundle.textBrief}`,
+    `推荐提示：${bundle.recommendation || "无"}`,
+    `风险提示：${bundle.warning || "无"}`,
+    `基础安全提示：${bundle.imagePrompt}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const resp = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: "你是高约束生图提示词工程师，只输出JSON，不输出其他内容。" },
+        { role: "user", content: promptTask },
+      ],
+    }),
+  });
+
+  if (!resp.ok) {
+    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt };
+  }
+
+  const data = await resp.json();
+  const content = String(data?.choices?.[0]?.message?.content ?? "{}");
+  const parsed = parsePromptJson(content);
+
+  const prompt = String(parsed?.prompt || "").trim() || bundle.imagePrompt;
+  const negative = String(parsed?.negative || "").trim() || bundle.negativePrompt;
+  return { prompt, negative };
 }
 
 async function callSiliconText(apiKey: string, model: string, promptBrief: string, subject: string, warning: string | null) {
@@ -200,8 +346,10 @@ async function callSiliconText(apiKey: string, model: string, promptBrief: strin
   };
 }
 
-async function callSiliconImage(apiKey: string, model: string, prompt: string) {
+async function callSiliconImage(apiKey: string, model: string, prompt: string, negativePrompt: string) {
   if (!apiKey) return "https://picsum.photos/768/1024";
+
+  const finalPrompt = [prompt, `Negative constraints: ${negativePrompt}`].filter(Boolean).join(". ");
 
   const resp = await fetch("https://api.siliconflow.cn/v1/images/generations", {
     method: "POST",
@@ -211,7 +359,7 @@ async function callSiliconImage(apiKey: string, model: string, prompt: string) {
     },
     body: JSON.stringify({
       model,
-      prompt,
+      prompt: finalPrompt,
       size: "1024x1024",
     }),
   });
@@ -236,7 +384,8 @@ Deno.serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
     const siliconflowKey = Deno.env.get("SILICONFLOW_API_KEY") || "";
-    const textModel = Deno.env.get("SILICONFLOW_TEXT_MODEL") || "Pro/MiniMaxAI/MiniMax-M2.5";
+    const textModel = Deno.env.get("SILICONFLOW_TEXT_MODEL") || "Pro/deepseek-ai/DeepSeek-V3.2";
+    const promptModel = Deno.env.get("SILICONFLOW_PROMPT_MODEL") || "Qwen/Qwen2.5-7B-Instruct";
     const imageModel = Deno.env.get("SILICONFLOW_IMAGE_MODEL") || "Qwen/Qwen-Image";
 
     const authHeader = req.headers.get("Authorization") || "";
@@ -259,6 +408,7 @@ Deno.serve(async (req) => {
       styleHint?: string;
       budget?: number;
       subject?: string;
+      recipient?: string;
       customInput?: string;
     };
 
@@ -267,6 +417,7 @@ Deno.serve(async (req) => {
     const productType = (body.productType || "").trim();
     const styleHint = (body.styleHint || "").trim();
     const subject = (body.subject || "").trim();
+    const recipient = (body.recipient || "").trim() || "收礼人";
     const customInput = (body.customInput || "").trim();
     const budget = Number(body.budget || 0);
 
@@ -275,6 +426,7 @@ Deno.serve(async (req) => {
       validateLength("纹饰", pattern, 1, 30),
       validateLength("成品类型", productType, 1, 30),
       validateLength("主题", subject, 2, 60),
+      validateLength("送礼对象", recipient, 2, 30),
       customInput ? validateLength("自定义要求", customInput, 2, 120) : null,
       styleHint ? validateLength("风格", styleHint, 1, 40) : null,
       Number.isFinite(budget) && budget > 0 ? null : "预算不合法",
@@ -294,9 +446,15 @@ Deno.serve(async (req) => {
       return json({ message: "Quota exceeded" }, 403);
     }
 
-    const bundle = buildPromptBundle({ material, pattern, productType, styleHint, budget, subject, customInput });
+    const bundle = buildPromptBundle({ material, pattern, productType, styleHint, budget, subject, recipient, customInput });
     const text = await callSiliconText(siliconflowKey, textModel, bundle.textBrief, subject, bundle.warning);
-    const imageUrl = await callSiliconImage(siliconflowKey, imageModel, bundle.imagePrompt);
+    const composed = await callSiliconPromptComposer(
+      siliconflowKey,
+      promptModel,
+      bundle,
+      { material, pattern, productType, styleHint, budget, subject, recipient, customInput }
+    );
+    const imageUrl = await callSiliconImage(siliconflowKey, imageModel, composed.prompt, composed.negative);
 
     const title = `${pattern}${productType} · ${styleHint || material}`;
 
