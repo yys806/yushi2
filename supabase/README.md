@@ -70,7 +70,7 @@ where key = 'admin_email';
 
 ```bash
 npx supabase secrets set SILICONFLOW_API_KEY=YOUR_SILICONFLOW_API_KEY
-npx supabase secrets set SILICONFLOW_TEXT_MODEL=Pro/MiniMaxAI/MiniMax-M2.5
+npx supabase secrets set SILICONFLOW_TEXT_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
 npx supabase secrets set SILICONFLOW_IMAGE_MODEL=Qwen/Qwen-Image
 ```
 

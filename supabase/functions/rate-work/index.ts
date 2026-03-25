@@ -88,7 +88,7 @@ Deno.serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
     const siliconflowKey = Deno.env.get("SILICONFLOW_API_KEY") || "";
-    const textModel = Deno.env.get("SILICONFLOW_TEXT_MODEL") || "Pro/MiniMaxAI/MiniMax-M2.5";
+    const textModel = Deno.env.get("SILICONFLOW_TEXT_MODEL") || "Pro/deepseek-ai/DeepSeek-V3.2";
 
     const authHeader = req.headers.get("Authorization") || "";
     if (!authHeader.startsWith("Bearer ")) return json({ message: "Unauthorized" }, 401);
