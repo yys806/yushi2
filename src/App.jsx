@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import html2canvas from "html2canvas";
 import { supabase } from "./supabaseClient";
 
 const jadeImages = [
@@ -38,6 +37,12 @@ function isAuthFailure(message) {
   return msg.includes("401") || msg.includes("403") || msg.includes("unauthorized") || msg.includes("forbidden") || msg.includes("登录");
 }
 
+function isMissingRelationError(err) {
+  const code = String(err?.code || "").toUpperCase();
+  const msg = String(err?.message || "").toLowerCase();
+  return code === "42P01" || code === "PGRST205" || (msg.includes("schema cache") && msg.includes("could not find the table"));
+}
+
 function formatBudget(v) {
   return v >= 10000 ? "¥10000+" : `¥${v}`;
 }
@@ -47,6 +52,67 @@ function formatTime(value) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "-";
   return d.toLocaleString("zh-CN", { hour12: false });
+}
+
+function normalizeGradeReason(rawReason) {
+  const reason = String(rawReason || "").trim();
+  if (!reason) return "";
+  if (reason.includes("正在由AI进行评分")) return "";
+  return reason;
+}
+
+function normalizeGradeWeights(raw) {
+  return {
+    s: Math.max(0, Math.floor(Number(raw?.s ?? raw?.s_weight ?? 1) || 0)),
+    a: Math.max(0, Math.floor(Number(raw?.a ?? raw?.a_weight ?? 10) || 0)),
+    b: Math.max(0, Math.floor(Number(raw?.b ?? raw?.b_weight ?? 30) || 0)),
+    c: Math.max(0, Math.floor(Number(raw?.c ?? raw?.c_weight ?? 50) || 0)),
+  };
+}
+
+function pickGradeByWeightsRandom(weights) {
+  const s = weights.s;
+  const a = weights.a;
+  const b = weights.b;
+  const c = weights.c;
+  const total = s + a + b + c;
+  if (total <= 0) return "C级";
+  const hit = Math.floor(Math.random() * total) + 1;
+  if (hit <= s) return "S级";
+  if (hit <= s + a) return "A级";
+  if (hit <= s + a + b) return "B级";
+  return "C级";
+}
+
+function pickGradeByWeightsStable(seed, weights) {
+  const s = weights.s;
+  const a = weights.a;
+  const b = weights.b;
+  const c = weights.c;
+  const total = s + a + b + c;
+  if (total <= 0) return "C级";
+  const raw = String(seed || "");
+  let hash = 0;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+  }
+  const hit = (hash % total) + 1;
+  if (hit <= s) return "S级";
+  if (hit <= s + a) return "A级";
+  if (hit <= s + a + b) return "B级";
+  return "C级";
+}
+
+function resolvePendingGrade(work, weights, stable = true) {
+  const rawGrade = String(work?.grade || "").trim();
+  if (!rawGrade.includes("评级中")) return work;
+  const grade = stable ? pickGradeByWeightsStable(work?.id, weights) : pickGradeByWeightsRandom(weights);
+  const reason = normalizeGradeReason(work?.gradeReason) || "已按当前概率规则完成评级，AI评语正在同步中。";
+  return {
+    ...work,
+    grade,
+    gradeReason: reason,
+  };
 }
 
 function safeFileName(value) {
@@ -111,25 +177,17 @@ async function compressImageFile(file) {
   return new File([blob], `${safeFileName(file.name.replace(/\.[^.]+$/, ""))}.webp`, { type: "image/webp" });
 }
 
-function triggerDownload(url, filename) {
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
 function mapWork(item) {
+  const source = Array.isArray(item) ? item[0] || {} : item || {};
   return {
-    id: item.id,
-    name: item.title,
-    summary: `材质：${item.material}，纹饰：${item.pattern}`,
-    detailInspo: item.inspiration,
-    detailMeaning: item.meaning,
-    image: item.image_url || item.imageUrl || jadeImages[0],
-    grade: item.grade || "评级中...",
-    gradeReason: item.grade_reason || item.gradeReason || "",
+    id: source.id,
+    name: source.title,
+    summary: `材质：${source.material}，纹饰：${source.pattern}`,
+    detailInspo: source.inspiration,
+    detailMeaning: source.meaning,
+    image: source.image_url || source.imageUrl || jadeImages[0],
+    grade: source.grade || "评级中...",
+    gradeReason: normalizeGradeReason(source.grade_reason || source.gradeReason),
   };
 }
 
@@ -289,11 +347,12 @@ export default function App() {
   const [applyMessage, setApplyMessage] = useState("");
   const [applyDialogOpen, setApplyDialogOpen] = useState(false);
   const [applyForm, setApplyForm] = useState({ applicantName: "", reason: "" });
-  const [adminPayload, setAdminPayload] = useState({ users: [], applications: [], notices: [], museumItems: [] });
+  const [adminPayload, setAdminPayload] = useState({ users: [], applications: [], notices: [], museumItems: [], gradeConfig: null });
   const [reviewNote, setReviewNote] = useState("");
   const [noticeDraft, setNoticeDraft] = useState({ title: "", content: "", kind: "normal", targetUserId: "" });
   const [activityDraft, setActivityDraft] = useState({ title: "", content: "", rewardTimes: 10, targetUserId: "" });
   const [quotaAdjustMap, setQuotaAdjustMap] = useState({});
+  const [gradeDraft, setGradeDraft] = useState({ sWeight: 1, aWeight: 10, bWeight: 30, cWeight: 50 });
   const [adminForm, setAdminForm] = useState({ email: "", password: "" });
   const [adminToken, setAdminToken] = useState(() => {
     if (typeof window === "undefined") return "";
@@ -309,6 +368,7 @@ export default function App() {
   const [museumRefreshing, setMuseumRefreshing] = useState(false);
   const [museumForm, setMuseumForm] = useState({ category: "natural", title: "", description: "" });
   const [museumFile, setMuseumFile] = useState(null);
+  const [gradeWeights, setGradeWeights] = useState(() => normalizeGradeWeights({ s: 1, a: 10, b: 30, c: 50 }));
 
   const [custom, setCustom] = useState({
     material: "翡翠",
@@ -323,9 +383,6 @@ export default function App() {
   const [selectedFavoriteId, setSelectedFavoriteId] = useState("");
   const carouselRef = useRef(null);
   const islandTimerRef = useRef(null);
-  const productCardRef = useRef(null);
-  const historyCardRef = useRef(null);
-  const favoriteCardRef = useRef(null);
   const [profileEdit, setProfileEdit] = useState({
     nickname: "",
     oldPassword: "",
@@ -441,7 +498,16 @@ export default function App() {
         applications: dashData?.applications || [],
         notices: dashData?.notices || [],
         museumItems: dashData?.museumItems || [],
+        gradeConfig: dashData?.gradeConfig || null,
       });
+      if (dashData?.gradeConfig) {
+        setGradeDraft({
+          sWeight: Number(dashData.gradeConfig.s_weight ?? 1),
+          aWeight: Number(dashData.gradeConfig.a_weight ?? 10),
+          bWeight: Number(dashData.gradeConfig.b_weight ?? 30),
+          cWeight: Number(dashData.gradeConfig.c_weight ?? 50),
+        });
+      }
       setAdminForm((prev) => ({ ...prev, password: "" }));
       showIsland("管理员登录成功");
     } catch (e) {
@@ -453,15 +519,30 @@ export default function App() {
 
   const handleAdminLogout = () => {
     setAdminToken("");
-    setAdminPayload({ users: [], applications: [], notices: [], museumItems: [] });
+    setAdminPayload({ users: [], applications: [], notices: [], museumItems: [], gradeConfig: null });
     setReviewNote("");
     setNoticeDraft({ title: "", content: "", kind: "normal", targetUserId: "" });
     setActivityDraft({ title: "", content: "", rewardTimes: 10, targetUserId: "" });
     setQuotaAdjustMap({});
+    setGradeDraft({ sWeight: 1, aWeight: 10, bWeight: 30, cWeight: 50 });
     setMuseumForm({ category: "natural", title: "", description: "" });
     setMuseumFile(null);
     setAdminForm((prev) => ({ ...prev, password: "" }));
   };
+
+  const rateWorkWithRetry = useCallback(async (workId, retry = 3) => {
+    if (!workId) return null;
+    for (let i = 0; i < retry; i += 1) {
+      const { data, error: invokeErr } = await supabase.functions.invoke("rate-work", {
+        body: { workId },
+      });
+      if (!invokeErr && data?.grade) {
+        return { grade: data.grade, reason: normalizeGradeReason(data.reason) };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 280 * (i + 1)));
+    }
+    return null;
+  }, []);
 
   const loadUserData = useCallback(async (u) => {
     if (!u) return;
@@ -487,7 +568,7 @@ export default function App() {
         isAdmin: Boolean(profileRow?.is_admin),
       });
 
-      const [worksRes, favRes, appRes, noticeRes, readRes, claimRes, museumRes] = await Promise.all([
+      const [worksRes, favRes, appRes, noticeRes, readRes, claimRes, museumRes, gradeConfigRes] = await Promise.all([
         supabase
           .from("works")
           .select("*")
@@ -525,20 +606,48 @@ export default function App() {
           .eq("active", true)
           .order("created_at", { ascending: false })
           .limit(100),
+        supabase
+          .from("grade_probabilities")
+          .select("s_weight,a_weight,b_weight,c_weight")
+          .eq("id", "default")
+          .maybeSingle(),
       ]);
 
       if (worksRes.error) throw worksRes.error;
       if (favRes.error) throw favRes.error;
       if (appRes.error) throw appRes.error;
       if (noticeRes.error) throw noticeRes.error;
-      if (readRes.error && readRes.error.code !== "42P01") throw readRes.error;
-      if (claimRes.error && claimRes.error.code !== "42P01") throw claimRes.error;
-      if (museumRes.error && museumRes.error.code !== "42P01") throw museumRes.error;
+      if (readRes.error && !isMissingRelationError(readRes.error)) throw readRes.error;
+      if (claimRes.error && !isMissingRelationError(claimRes.error)) throw claimRes.error;
+      if (museumRes.error && !isMissingRelationError(museumRes.error)) throw museumRes.error;
+      if (gradeConfigRes.error && !isMissingRelationError(gradeConfigRes.error)) throw gradeConfigRes.error;
 
-      const mappedHistory = (worksRes.data || []).map(mapWork);
+      const activeWeights = normalizeGradeWeights({
+        s_weight: gradeConfigRes.data?.s_weight,
+        a_weight: gradeConfigRes.data?.a_weight,
+        b_weight: gradeConfigRes.data?.b_weight,
+        c_weight: gradeConfigRes.data?.c_weight,
+      });
+      setGradeWeights(activeWeights);
+
+      const mappedHistory = (worksRes.data || []).map((row) => resolvePendingGrade(mapWork(row), activeWeights, true));
       setHistory(mappedHistory);
 
-      const mappedFav = (favRes.data || []).map((row) => mapWork(row.works));
+      const pendingWorks = (worksRes.data || []).filter((w) => String(w?.grade || "").includes("评级中")).slice(0, 3);
+      if (pendingWorks.length) {
+        void (async () => {
+          let changed = false;
+          for (const row of pendingWorks) {
+            const rated = await rateWorkWithRetry(row.id, 2);
+            if (rated?.grade) changed = true;
+          }
+          if (changed) {
+            await loadUserData(u);
+          }
+        })();
+      }
+
+      const mappedFav = (favRes.data || []).map((row) => resolvePendingGrade(mapWork(row.works), activeWeights, true));
       setFavorites(mappedFav);
 
       setApplications(appRes.data || []);
@@ -552,7 +661,7 @@ export default function App() {
     } finally {
       setLoadingData(false);
     }
-  }, [currentWork]);
+  }, [currentWork, rateWorkWithRetry]);
 
   useEffect(() => {
     if (!isAdminRoute || typeof window === "undefined") return;
@@ -600,7 +709,7 @@ export default function App() {
         setActiveMessage(null);
         setMuseumItems([]);
         setSelectedMuseumId("");
-        setAdminPayload({ users: [], applications: [], notices: [], museumItems: [] });
+        setAdminPayload({ users: [], applications: [], notices: [], museumItems: [], gradeConfig: null });
         setCurrentWork(null);
         setPage("home");
         setStack([]);
@@ -718,14 +827,20 @@ export default function App() {
       const mapped = mapWork(data?.work ?? data);
       setGeneratePhase("rating");
       const ratingCapPromise = animateProgressBar("rating", 90, 1, 110);
-      const ratingResp = await supabase.functions.invoke("rate-work", {
-        body: { workId: mapped.id },
-      });
+      const rated = await rateWorkWithRetry(mapped.id, 3);
       await ratingCapPromise;
 
-      if (!ratingResp.error && ratingResp.data?.grade) {
-        mapped.grade = ratingResp.data.grade;
-        mapped.gradeReason = ratingResp.data.reason || "";
+      if (rated?.grade) {
+        mapped.grade = rated.grade;
+        mapped.gradeReason = rated.reason || "";
+      } else {
+        mapped.grade = pickGradeByWeightsRandom(gradeWeights);
+        mapped.gradeReason = normalizeGradeReason(mapped.gradeReason) || "已按当前概率规则完成评级，AI评语正在同步中。";
+        void supabase
+          .from("works")
+          .update({ grade: mapped.grade, grade_reason: mapped.gradeReason })
+          .eq("id", mapped.id)
+          .eq("user_id", user?.id || "");
       }
 
       await animateProgressBar("rating", 100, 2, 65);
@@ -923,7 +1038,16 @@ export default function App() {
         applications: data?.applications || [],
         notices: data?.notices || [],
         museumItems: data?.museumItems || [],
+        gradeConfig: data?.gradeConfig || null,
       });
+      if (data?.gradeConfig) {
+        setGradeDraft({
+          sWeight: Number(data.gradeConfig.s_weight ?? 1),
+          aWeight: Number(data.gradeConfig.a_weight ?? 10),
+          bWeight: Number(data.gradeConfig.b_weight ?? 30),
+          cWeight: Number(data.gradeConfig.c_weight ?? 50),
+        });
+      }
     } catch (e) {
       const message = e?.message || "后台数据加载失败";
       setAdminError(message);
@@ -972,8 +1096,8 @@ export default function App() {
       if (profileRes.error) throw profileRes.error;
       if (appRes.error) throw appRes.error;
       if (noticeRes.error) throw noticeRes.error;
-      if (readRes.error && readRes.error.code !== "42P01") throw readRes.error;
-      if (claimRes.error && claimRes.error.code !== "42P01") throw claimRes.error;
+      if (readRes.error && !isMissingRelationError(readRes.error)) throw readRes.error;
+      if (claimRes.error && !isMissingRelationError(claimRes.error)) throw claimRes.error;
 
       const profileRow = profileRes.data;
       if (profileRow) {
@@ -1010,7 +1134,7 @@ export default function App() {
         .eq("active", true)
         .order("created_at", { ascending: false })
         .limit(100);
-      if (museumErr && museumErr.code !== "42P01") throw museumErr;
+      if (museumErr && !isMissingRelationError(museumErr)) throw museumErr;
       setMuseumItems(museumErr ? [] : data || []);
       showIsland("玉苑已刷新");
     } catch (e) {
@@ -1334,38 +1458,37 @@ export default function App() {
     setApplyDialogOpen(true);
   };
 
-  const handleDownloadProductCard = async (cardRef, work, prefix) => {
-    const node = cardRef?.current;
-    if (!node || !work) return;
-    setError("");
-    try {
-      const canvas = await html2canvas(node, {
-        useCORS: true,
-        allowTaint: false,
-        backgroundColor: "#ffffff",
-        scale: 2,
-      });
-      const dataUrl = canvas.toDataURL("image/png");
-      triggerDownload(dataUrl, `${prefix}_${safeFileName(work.name || "作品")}.png`);
-      showIsland("卡片已下载");
-    } catch (e) {
-      setError(e?.message || "下载失败，请稍后重试");
-    }
-  };
+  const handleUpdateGradeProbabilities = async () => {
+    const sWeight = Math.max(0, Math.floor(Number(gradeDraft.sWeight)));
+    const aWeight = Math.max(0, Math.floor(Number(gradeDraft.aWeight)));
+    const bWeight = Math.max(0, Math.floor(Number(gradeDraft.bWeight)));
+    const cWeight = Math.max(0, Math.floor(Number(gradeDraft.cWeight)));
+    const total = sWeight + aWeight + bWeight + cWeight;
 
-  const handleDownloadMuseumImage = async (item) => {
-    if (!item?.image_url) return;
-    setError("");
+    if (!Number.isFinite(total) || total <= 0) {
+      setAdminError("概率总和必须大于 0");
+      return;
+    }
+
+    setAdminError("");
+    setAdminActionLoading(true);
     try {
-      const resp = await fetch(item.image_url, { mode: "cors" });
-      if (!resp.ok) throw new Error(`图片下载失败(${resp.status})`);
-      const blob = await resp.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      triggerDownload(objectUrl, `玉苑_${safeFileName(item.title || "图片")}.jpg`);
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-      showIsland("图片已下载");
+      await adminInvoke("update-grade-probabilities", {
+        sWeight,
+        aWeight,
+        bWeight,
+        cWeight,
+      });
+      showIsland("评级概率已更新");
+      await loadAdminDashboard();
     } catch (e) {
-      setError(e?.message || "图片下载失败");
+      const message = e?.message || "更新评级概率失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
     }
   };
 
@@ -1468,7 +1591,7 @@ export default function App() {
         },
         { onConflict: "user_id,message_type,message_id" }
       );
-      if (upsertErr && upsertErr.code !== "42P01") throw upsertErr;
+      if (upsertErr && !isMissingRelationError(upsertErr)) throw upsertErr;
       setMessageReads((prev) => {
         const exists = prev.some((r) => r.message_type === item.messageType && r.message_id === item.messageId);
         if (exists) {
@@ -1534,7 +1657,7 @@ export default function App() {
       const { error: upsertErr } = await supabase.from("message_reads").upsert(payload, {
         onConflict: "user_id,message_type,message_id",
       });
-      if (upsertErr && upsertErr.code !== "42P01") throw upsertErr;
+      if (upsertErr && !isMissingRelationError(upsertErr)) throw upsertErr;
       await refreshNoticesAndApplications();
       showIsland("已全部标记为已读");
     } catch (e) {
@@ -1686,20 +1809,18 @@ export default function App() {
       </header>
       <p className="muted">生成结果与账号绑定，历史与收藏隔离</p>
       <section className="product-wrap">
-        <div ref={productCardRef}>
-          <ProductCard
-            work={
-              currentWork || {
-                id: "pending",
-                name: "作品生成中",
-                detailInspo: "正在生成设计灵感...",
-                detailMeaning: "正在生成寓意说明...",
-                image: jadeImages[0],
-                grade: "--",
-              }
+        <ProductCard
+          work={
+            currentWork || {
+              id: "pending",
+              name: "作品生成中",
+              detailInspo: "正在生成设计灵感...",
+              detailMeaning: "正在生成寓意说明...",
+              image: jadeImages[0],
+              grade: "--",
             }
-          />
-        </div>
+          }
+        />
       </section>
       {currentWork?.gradeReason ? (
         <section className="card form-table">
@@ -1709,9 +1830,6 @@ export default function App() {
       ) : null}
       <button type="button" className="btn btn-primary" onClick={handleFavorite}>
         {favorites.some((x) => x.id === currentWork?.id) ? "取消收藏" : "收藏"}
-      </button>
-      <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadProductCard(productCardRef, currentWork, "成品卡片")} disabled={!currentWork}>
-        下载成品卡片
       </button>
       <button type="button" className="btn btn-ghost" onClick={() => navTo("custom")}>
         再次编辑
@@ -2054,13 +2172,14 @@ export default function App() {
             <button type="button" className={`admin-menu-btn ${adminMenu === "users" ? "active" : ""}`} onClick={() => setAdminMenu("users")}>用户管理</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "notices" ? "active" : ""}`} onClick={() => setAdminMenu("notices")}>公告发布</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "activities" ? "active" : ""}`} onClick={() => setAdminMenu("activities")}>活动发布</button>
+            <button type="button" className={`admin-menu-btn ${adminMenu === "rating" ? "active" : ""}`} onClick={() => setAdminMenu("rating")}>评级概率</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "museum" ? "active" : ""}`} onClick={() => setAdminMenu("museum")}>玉苑管理</button>
             <button type="button" className="btn btn-ghost" onClick={handleAdminLogout}>退出后台</button>
           </aside>
 
           <section className="admin-main">
             <header className="admin-topbar">
-            <h1>{adminMenu === "approvals" ? "事项审批" : adminMenu === "users" ? "用户管理" : adminMenu === "notices" ? "公告发布" : adminMenu === "activities" ? "活动发布" : "玉苑管理"}</h1>
+            <h1>{adminMenu === "approvals" ? "事项审批" : adminMenu === "users" ? "用户管理" : adminMenu === "notices" ? "公告发布" : adminMenu === "activities" ? "活动发布" : adminMenu === "rating" ? "评级概率" : "玉苑管理"}</h1>
             <button type="button" className="btn btn-ghost" onClick={() => void loadAdminDashboard()} disabled={loadingAdmin || adminActionLoading}>刷新数据</button>
           </header>
             {loadingAdmin ? <p className="muted">加载中...</p> : null}
@@ -2205,6 +2324,34 @@ export default function App() {
                     </div>
                   </article>
                 ))}
+              </section>
+            ) : null}
+
+            {adminMenu === "rating" ? (
+              <section className="card form-table">
+                <h3 className="section-title">评级概率配置</h3>
+                <p className="muted">当前随机评级由以下权重控制，系统会按权重比例随机抽取 S/A/B/C。</p>
+                <label className="row-field">
+                  S级权重
+                  <input type="number" min="0" step="1" value={gradeDraft.sWeight} onChange={(e) => setGradeDraft((s) => ({ ...s, sWeight: e.target.value }))} />
+                </label>
+                <label className="row-field">
+                  A级权重
+                  <input type="number" min="0" step="1" value={gradeDraft.aWeight} onChange={(e) => setGradeDraft((s) => ({ ...s, aWeight: e.target.value }))} />
+                </label>
+                <label className="row-field">
+                  B级权重
+                  <input type="number" min="0" step="1" value={gradeDraft.bWeight} onChange={(e) => setGradeDraft((s) => ({ ...s, bWeight: e.target.value }))} />
+                </label>
+                <label className="row-field">
+                  C级权重
+                  <input type="number" min="0" step="1" value={gradeDraft.cWeight} onChange={(e) => setGradeDraft((s) => ({ ...s, cWeight: e.target.value }))} />
+                </label>
+                <p className="muted tiny">当前总和：{Math.max(0, Number(gradeDraft.sWeight) || 0) + Math.max(0, Number(gradeDraft.aWeight) || 0) + Math.max(0, Number(gradeDraft.bWeight) || 0) + Math.max(0, Number(gradeDraft.cWeight) || 0)}</p>
+                <button type="button" className="btn btn-primary" disabled={adminActionLoading} onClick={handleUpdateGradeProbabilities}>保存概率配置</button>
+                {adminPayload.gradeConfig ? (
+                  <p className="muted tiny">最近更新时间：{formatTime(adminPayload.gradeConfig.updated_at)}</p>
+                ) : null}
               </section>
             ) : null}
 
@@ -2384,14 +2531,14 @@ export default function App() {
             <h1>历史记录详情</h1>
           </header>
           <section className="product-wrap">
-            <div ref={historyCardRef}>
-              <ProductCard work={historyDetail} />
-            </div>
+            <ProductCard work={historyDetail} />
           </section>
           {historyDetail ? (
-            <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadProductCard(historyCardRef, historyDetail, "历史记录卡片")}>
-              下载历史卡片
-            </button>
+            <section className="card form-table">
+              <h3 className="section-title">作品评级</h3>
+              <p className="muted">当前等级：{historyDetail.grade || "评级中..."}</p>
+              {historyDetail.gradeReason ? <p className="muted">AI评级说明：{historyDetail.gradeReason}</p> : null}
+            </section>
           ) : null}
           {historyDetail ? (
             <button type="button" className="btn btn-ghost" onClick={() => handleDeleteHistory(historyDetail.id)}>
@@ -2417,14 +2564,14 @@ export default function App() {
             <h1>收藏详情</h1>
           </header>
           <section className="product-wrap">
-            <div ref={favoriteCardRef}>
-              <ProductCard work={favoriteDetail} />
-            </div>
+            <ProductCard work={favoriteDetail} />
           </section>
           {favoriteDetail ? (
-            <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadProductCard(favoriteCardRef, favoriteDetail, "收藏卡片")}>
-              下载收藏卡片
-            </button>
+            <section className="card form-table">
+              <h3 className="section-title">作品评级</h3>
+              <p className="muted">当前等级：{favoriteDetail.grade || "评级中..."}</p>
+              {favoriteDetail.gradeReason ? <p className="muted">AI评级说明：{favoriteDetail.gradeReason}</p> : null}
+            </section>
           ) : null}
           {favoriteDetail ? (
             <button type="button" className="btn btn-ghost" onClick={() => handleDeleteFavorite(favoriteDetail.id)}>
@@ -2449,9 +2596,6 @@ export default function App() {
               <h3>{museumDetail.title}</h3>
               <p className="muted tiny">发布时间：{formatTime(museumDetail.created_at)}</p>
               <p>{museumDetail.description}</p>
-              <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadMuseumImage(museumDetail)}>
-                下载原图
-              </button>
             </article>
           ) : (
             <p className="muted">暂无详情内容</p>

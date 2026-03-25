@@ -234,6 +234,7 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
     const siliconflowKey = Deno.env.get("SILICONFLOW_API_KEY") || "";
     const textModel = Deno.env.get("SILICONFLOW_TEXT_MODEL") || "Pro/MiniMaxAI/MiniMax-M2.5";
     const imageModel = Deno.env.get("SILICONFLOW_IMAGE_MODEL") || "Qwen/Qwen-Image";
@@ -241,11 +242,14 @@ Deno.serve(async (req) => {
     const authHeader = req.headers.get("Authorization") || "";
     if (!authHeader.startsWith("Bearer ")) return json({ message: "Unauthorized" }, 401);
 
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    const authedClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
     });
+    const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
-    const { data: auth, error: authError } = await supabase.auth.getUser();
+    const { data: auth, error: authError } = await authedClient.auth.getUser();
     if (authError || !auth?.user) return json({ message: "Unauthorized" }, 401);
 
     const body = (await req.json()) as {
@@ -278,7 +282,7 @@ Deno.serve(async (req) => {
     const bad = checks.find((x) => Boolean(x));
     if (bad) return json({ message: bad }, 400);
 
-    const { data: profile, error: profileError } = await supabase
+    const { data: profile, error: profileError } = await authedClient
       .from("user_profiles")
       .select("id,email,nickname,quota_total,quota_used,is_admin")
       .eq("id", auth.user.id)
@@ -296,7 +300,7 @@ Deno.serve(async (req) => {
 
     const title = `${pattern}${productType} · ${styleHint || material}`;
 
-    const { data: inserted, error: insertError } = await supabase
+    const { data: inserted, error: insertError } = await adminClient
       .from("works")
       .insert({
         user_id: auth.user.id,
@@ -318,7 +322,7 @@ Deno.serve(async (req) => {
     if (insertError || !inserted) return json({ message: insertError?.message || "Insert failed" }, 500);
 
     if (!profile.is_admin) {
-      const { error: updateError } = await supabase
+      const { error: updateError } = await adminClient
         .from("user_profiles")
         .update({ quota_used: profile.quota_used + 1, updated_at: new Date().toISOString() })
         .eq("id", auth.user.id);

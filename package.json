@@ -8,11 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "supabase:link": "npx supabase link --project-ref yclkwilangwsmnnpqmwc",
-    "supabase:deploy:functions": "npx supabase functions deploy generate-work --no-verify-jwt && npx supabase functions deploy rate-work --no-verify-jwt && npx supabase functions deploy create-order --no-verify-jwt && npx supabase functions deploy signup-user --no-verify-jwt && npx supabase functions deploy admin-dashboard --no-verify-jwt && npx supabase functions deploy review-application --no-verify-jwt && npx supabase functions deploy publish-notice --no-verify-jwt && npx supabase functions deploy update-notice --no-verify-jwt && npx supabase functions deploy claim-reward --no-verify-jwt && npx supabase functions deploy publish-museum-item --no-verify-jwt && npx supabase functions deploy update-museum-item --no-verify-jwt && npx supabase functions deploy adjust-user-quota --no-verify-jwt && npx supabase functions deploy admin-delete-user --no-verify-jwt && npx supabase functions deploy admin-delete-notice --no-verify-jwt && npx supabase functions deploy admin-delete-museum-item --no-verify-jwt"
+    "supabase:deploy:functions": "npx supabase functions deploy generate-work --no-verify-jwt && npx supabase functions deploy rate-work --no-verify-jwt && npx supabase functions deploy create-order --no-verify-jwt && npx supabase functions deploy signup-user --no-verify-jwt && npx supabase functions deploy admin-dashboard --no-verify-jwt && npx supabase functions deploy review-application --no-verify-jwt && npx supabase functions deploy publish-notice --no-verify-jwt && npx supabase functions deploy update-notice --no-verify-jwt && npx supabase functions deploy update-grade-probabilities --no-verify-jwt && npx supabase functions deploy claim-reward --no-verify-jwt && npx supabase functions deploy claim-s-grade-reward --no-verify-jwt && npx supabase functions deploy publish-museum-item --no-verify-jwt && npx supabase functions deploy update-museum-item --no-verify-jwt && npx supabase functions deploy adjust-user-quota --no-verify-jwt && npx supabase functions deploy admin-delete-user --no-verify-jwt && npx supabase functions deploy admin-delete-notice --no-verify-jwt && npx supabase functions deploy admin-delete-museum-item --no-verify-jwt"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
-    "html2canvas": "^1.4.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

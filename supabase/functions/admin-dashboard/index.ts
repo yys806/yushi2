@@ -75,6 +75,13 @@ Deno.serve(async (req) => {
       .limit(100);
     if (museumError && museumError.code !== "42P01") return json({ message: museumError.message }, 500);
 
+    const { data: gradeConfig, error: gradeErr } = await adminClient
+      .from("grade_probabilities")
+      .select("id,s_weight,a_weight,b_weight,c_weight,updated_at")
+      .eq("id", "default")
+      .maybeSingle();
+    if (gradeErr && gradeErr.code !== "42P01") return json({ message: gradeErr.message }, 500);
+
     const usersWithRemaining = (users || []).map((u) => ({
       ...u,
       quota_remaining: Math.max(0, Number(u.quota_total) - Number(u.quota_used)),
@@ -85,6 +92,7 @@ Deno.serve(async (req) => {
       applications: apps || [],
       notices: notices || [],
       museumItems: museumError ? [] : museumItems || [],
+      gradeConfig: gradeErr ? null : gradeConfig || null,
     });
   } catch (e) {
     return json({ message: e instanceof Error ? e.message : "Unexpected error" }, 500);

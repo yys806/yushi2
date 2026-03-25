@@ -47,6 +47,25 @@ create table if not exists public.works (
 alter table public.works add column if not exists grade_score integer;
 alter table public.works add column if not exists grade_reason text;
 
+create table if not exists public.grade_probabilities (
+  id text primary key,
+  s_weight integer not null default 1 check (s_weight >= 0),
+  a_weight integer not null default 10 check (a_weight >= 0),
+  b_weight integer not null default 30 check (b_weight >= 0),
+  c_weight integer not null default 50 check (c_weight >= 0),
+  updated_at timestamptz not null default now(),
+  check (s_weight + a_weight + b_weight + c_weight > 0)
+);
+
+insert into public.grade_probabilities(id, s_weight, a_weight, b_weight, c_weight)
+values ('default', 1, 10, 30, 50)
+on conflict (id) do update set
+  s_weight = excluded.s_weight,
+  a_weight = excluded.a_weight,
+  b_weight = excluded.b_weight,
+  c_weight = excluded.c_weight,
+  updated_at = now();
+
 create index if not exists works_user_created_idx on public.works(user_id, created_at desc);
 
 create table if not exists public.favorites (
@@ -148,8 +167,73 @@ create table if not exists public.reward_claims (
   unique(user_id, notice_id)
 );
 
+create table if not exists public.s_grade_claims (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  work_id uuid not null references public.works(id) on delete cascade,
+  reward_times integer not null default 10 check (reward_times > 0),
+  claimed_at timestamptz not null default now(),
+  unique(user_id, work_id)
+);
+
+create or replace function public.claim_s_grade_reward(p_work_id uuid, p_reward_times integer default 10)
+returns table (already_claimed boolean, reward_times integer, quota_total integer)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_inserted integer := 0;
+begin
+  if v_uid is null then
+    raise exception 'Unauthorized';
+  end if;
+
+  if p_reward_times is null or p_reward_times <= 0 then
+    raise exception 'reward_times invalid';
+  end if;
+
+  if not exists (
+    select 1
+    from public.works w
+    where w.id = p_work_id
+      and w.user_id = v_uid
+      and w.grade = 'S级'
+  ) then
+    raise exception '仅S级神卡可兑换';
+  end if;
+
+  insert into public.s_grade_claims(user_id, work_id, reward_times)
+  values (v_uid, p_work_id, p_reward_times)
+  on conflict (user_id, work_id) do nothing;
+
+  get diagnostics v_inserted = row_count;
+
+  if v_inserted = 1 then
+    update public.user_profiles up
+    set quota_total = up.quota_total + p_reward_times
+    where up.id = v_uid
+    returning up.quota_total into quota_total;
+    already_claimed := false;
+  else
+    select up.quota_total into quota_total
+    from public.user_profiles up
+    where up.id = v_uid;
+    already_claimed := true;
+  end if;
+
+  reward_times := p_reward_times;
+  return next;
+end;
+$$;
+
+revoke all on function public.claim_s_grade_reward(uuid, integer) from public;
+grant execute on function public.claim_s_grade_reward(uuid, integer) to authenticated;
+
 create index if not exists message_reads_user_read_idx on public.message_reads(user_id, read_at desc);
 create index if not exists reward_claims_user_claimed_idx on public.reward_claims(user_id, claimed_at desc);
+create index if not exists s_grade_claims_user_claimed_idx on public.s_grade_claims(user_id, claimed_at desc);
 
 create table if not exists public.museum_items (
   id uuid primary key default gen_random_uuid(),
@@ -219,6 +303,7 @@ for each row execute procedure public.handle_new_user_profile();
 
 alter table public.user_profiles enable row level security;
 alter table public.works enable row level security;
+alter table public.grade_probabilities enable row level security;
 alter table public.favorites enable row level security;
 alter table public.recharge_packages enable row level security;
 alter table public.orders enable row level security;
@@ -226,6 +311,7 @@ alter table public.quota_applications enable row level security;
 alter table public.notices enable row level security;
 alter table public.message_reads enable row level security;
 alter table public.reward_claims enable row level security;
+alter table public.s_grade_claims enable row level security;
 alter table public.museum_items enable row level security;
 
 drop policy if exists "profiles_select_own" on public.user_profiles;
@@ -236,17 +322,28 @@ drop policy if exists "profiles_update_own" on public.user_profiles;
 create policy "profiles_update_own" on public.user_profiles
 for update to authenticated using (auth.uid() = id) with check (auth.uid() = id);
 
+revoke update on table public.user_profiles from authenticated;
+grant update (nickname) on table public.user_profiles to authenticated;
+
 drop policy if exists "works_select_own" on public.works;
 create policy "works_select_own" on public.works
 for select to authenticated using (auth.uid() = user_id);
 
 drop policy if exists "works_insert_own" on public.works;
-create policy "works_insert_own" on public.works
-for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "works_update_own" on public.works;
 
 drop policy if exists "works_delete_own" on public.works;
 create policy "works_delete_own" on public.works
 for delete to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "grade_probs_select_all" on public.grade_probabilities;
+create policy "grade_probs_select_all" on public.grade_probabilities
+for select to authenticated using (true);
+
+drop policy if exists "grade_probs_update_admin" on public.grade_probabilities;
+create policy "grade_probs_update_admin" on public.grade_probabilities
+for update to authenticated using (public.is_admin_user(auth.uid())) with check (public.is_admin_user(auth.uid()));
 
 drop policy if exists "favorites_select_own" on public.favorites;
 create policy "favorites_select_own" on public.favorites
@@ -325,6 +422,14 @@ for select to authenticated using (auth.uid() = user_id);
 
 drop policy if exists "reward_claims_insert_own" on public.reward_claims;
 create policy "reward_claims_insert_own" on public.reward_claims
+for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "s_grade_claims_select_own" on public.s_grade_claims;
+create policy "s_grade_claims_select_own" on public.s_grade_claims
+for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "s_grade_claims_insert_own" on public.s_grade_claims;
+create policy "s_grade_claims_insert_own" on public.s_grade_claims
 for insert to authenticated with check (auth.uid() = user_id);
 
 drop policy if exists "museum_select_active" on public.museum_items;

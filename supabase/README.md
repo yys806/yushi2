@@ -66,7 +66,9 @@ This deploys:
 - `review-application`
 - `publish-notice`
 - `update-notice`
+- `update-grade-probabilities`
 - `claim-reward`
+- `claim-s-grade-reward`
 - `publish-museum-item`
 - `update-museum-item`
 - `adjust-user-quota`
