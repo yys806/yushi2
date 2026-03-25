@@ -38,8 +38,32 @@ npx supabase projects list
 
 ## 3) Link project
 
+Set your new project ref first:
+
+PowerShell:
+
+```powershell
+$env:SUPABASE_PROJECT_REF="YOUR_PROJECT_REF"
+```
+
+CMD:
+
+```cmd
+set SUPABASE_PROJECT_REF=YOUR_PROJECT_REF
+```
+
 ```bash
 npm run supabase:link
+```
+
+## 3.1) Configure admin email (required)
+
+Run this in Supabase SQL Editor (replace with your real admin account email):
+
+```sql
+update public.app_settings
+set value = 'YOUR_ADMIN_EMAIL'
+where key = 'admin_email';
 ```
 
 ## 4) Set edge function secrets
@@ -88,7 +112,7 @@ Set in Netlify site settings:
 ## 7) Smoke test
 
 1. Register a normal account (directly signs in, no email confirmation dependency, starts with 5 free quota).
-2. Register/login `3492675568@qq.com` (should be admin with unlimited quota).
+2. Register/login with the email configured in `public.app_settings.admin_email` (should be admin with unlimited quota).
 3. Generate once and verify history/favorites are account-isolated.
 4. Submit quota application from user page (`10/100/1000` options).
 5. Open `/admin` with admin account, approve/reject applications, publish notice.

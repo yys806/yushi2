@@ -11,6 +11,16 @@ create table if not exists public.user_profiles (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.app_settings (
+  key text primary key,
+  value text not null,
+  updated_at timestamptz not null default now()
+);
+
+insert into public.app_settings(key, value)
+values ('admin_email', '')
+on conflict (key) do nothing;
+
 create unique index if not exists user_profiles_nickname_unique_idx on public.user_profiles(nickname);
 
 create or replace function public.is_admin_user(uid uuid)
@@ -26,6 +36,18 @@ as $$
     where up.id = uid
       and up.is_admin = true
   );
+$$;
+
+create or replace function public.get_admin_email()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select lower(trim(value))
+  from public.app_settings
+  where key = 'admin_email';
 $$;
 
 create table if not exists public.works (
@@ -277,7 +299,7 @@ set search_path = public
 as $$
 declare
   nickname_value text;
-  admin_email constant text := '3492675568@qq.com';
+  admin_email text := coalesce(public.get_admin_email(), '');
 begin
   nickname_value := coalesce(new.raw_user_meta_data->>'nickname', split_part(new.email, '@', 1));
 
@@ -286,9 +308,9 @@ begin
     new.id,
     new.email,
     nickname_value,
-    case when lower(new.email) = admin_email then 2147483647 else 5 end,
+    case when admin_email <> '' and lower(new.email) = admin_email then 2147483647 else 5 end,
     0,
-    lower(new.email) = admin_email
+    admin_email <> '' and lower(new.email) = admin_email
   )
   on conflict (id) do nothing;
 
