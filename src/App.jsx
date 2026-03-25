@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import html2canvas from "html2canvas";
 import { supabase } from "./supabaseClient";
 
 const jadeImages = [
@@ -19,6 +20,9 @@ const options = {
 
 const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const ADMIN_TOKEN_STORAGE_KEY = "shenyu_admin_token";
+const MUSEUM_UPLOAD_MAX_MB = 15;
+const MUSEUM_UPLOAD_MAX_DIMENSION = 1800;
+const MUSEUM_UPLOAD_MAX_OUTPUT_MB = 3;
 
 function parseJsonSafe(raw) {
   if (!raw) return {};
@@ -43,6 +47,77 @@ function formatTime(value) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "-";
   return d.toLocaleString("zh-CN", { hour12: false });
+}
+
+function safeFileName(value) {
+  return String(value || "图片")
+    .trim()
+    .replace(/[\\/:*?"<>|\s]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64) || "图片";
+}
+
+function readImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("图片读取失败"));
+    };
+    img.src = objectUrl;
+  });
+}
+
+async function compressImageFile(file) {
+  if (!file?.type?.startsWith("image/")) {
+    throw new Error("请上传图片文件");
+  }
+
+  const originalSizeMb = file.size / (1024 * 1024);
+  if (originalSizeMb <= 1.2) {
+    return file;
+  }
+
+  const img = await readImageFromFile(file);
+  const ratio = Math.min(1, MUSEUM_UPLOAD_MAX_DIMENSION / Math.max(img.width, img.height));
+  const targetW = Math.max(1, Math.round(img.width * ratio));
+  const targetH = Math.max(1, Math.round(img.height * ratio));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("图片压缩失败");
+  ctx.drawImage(img, 0, 0, targetW, targetH);
+
+  const toBlob = (quality) =>
+    new Promise((resolve) => {
+      canvas.toBlob((blob) => resolve(blob), "image/webp", quality);
+    });
+
+  let quality = 0.88;
+  let blob = await toBlob(quality);
+  while (blob && blob.size > MUSEUM_UPLOAD_MAX_OUTPUT_MB * 1024 * 1024 && quality > 0.5) {
+    quality -= 0.1;
+    blob = await toBlob(quality);
+  }
+
+  if (!blob) throw new Error("图片压缩失败");
+  return new File([blob], `${safeFileName(file.name.replace(/\.[^.]+$/, ""))}.webp`, { type: "image/webp" });
+}
+
+function triggerDownload(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function mapWork(item) {
@@ -248,6 +323,9 @@ export default function App() {
   const [selectedFavoriteId, setSelectedFavoriteId] = useState("");
   const carouselRef = useRef(null);
   const islandTimerRef = useRef(null);
+  const productCardRef = useRef(null);
+  const historyCardRef = useRef(null);
+  const favoriteCardRef = useRef(null);
   const [profileEdit, setProfileEdit] = useState({
     nickname: "",
     oldPassword: "",
@@ -1028,10 +1106,21 @@ export default function App() {
       return;
     }
 
+    if (!museumFile.type?.startsWith("image/")) {
+      setAdminError("仅支持图片文件上传");
+      return;
+    }
+
+    if (museumFile.size > MUSEUM_UPLOAD_MAX_MB * 1024 * 1024) {
+      setAdminError(`原图不能超过 ${MUSEUM_UPLOAD_MAX_MB}MB，请压缩后再上传`);
+      return;
+    }
+
     setAdminError("");
     setAdminActionLoading(true);
     try {
-      const fileName = museumFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const uploadFile = await compressImageFile(museumFile);
+      const fileName = uploadFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
       const objectPath = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${fileName}`;
       const uploadResp = await fetch(`${supabaseUrl}/storage/v1/object/museum-assets/${objectPath}`, {
         method: "POST",
@@ -1039,9 +1128,9 @@ export default function App() {
           apikey: supabaseAnonKey,
           Authorization: `Bearer ${adminToken}`,
           "x-upsert": "false",
-          "Content-Type": museumFile.type || "application/octet-stream",
+          "Content-Type": uploadFile.type || "application/octet-stream",
         },
-        body: museumFile,
+        body: uploadFile,
       });
 
       const uploadRaw = await uploadResp.text();
@@ -1243,6 +1332,41 @@ export default function App() {
     setError("");
     setApplyMessage("");
     setApplyDialogOpen(true);
+  };
+
+  const handleDownloadProductCard = async (cardRef, work, prefix) => {
+    const node = cardRef?.current;
+    if (!node || !work) return;
+    setError("");
+    try {
+      const canvas = await html2canvas(node, {
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: "#ffffff",
+        scale: 2,
+      });
+      const dataUrl = canvas.toDataURL("image/png");
+      triggerDownload(dataUrl, `${prefix}_${safeFileName(work.name || "作品")}.png`);
+      showIsland("卡片已下载");
+    } catch (e) {
+      setError(e?.message || "下载失败，请稍后重试");
+    }
+  };
+
+  const handleDownloadMuseumImage = async (item) => {
+    if (!item?.image_url) return;
+    setError("");
+    try {
+      const resp = await fetch(item.image_url, { mode: "cors" });
+      if (!resp.ok) throw new Error(`图片下载失败(${resp.status})`);
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      triggerDownload(objectUrl, `玉苑_${safeFileName(item.title || "图片")}.jpg`);
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      showIsland("图片已下载");
+    } catch (e) {
+      setError(e?.message || "图片下载失败");
+    }
   };
 
   const quotaText = useMemo(() => {
@@ -1562,18 +1686,20 @@ export default function App() {
       </header>
       <p className="muted">生成结果与账号绑定，历史与收藏隔离</p>
       <section className="product-wrap">
-        <ProductCard
-          work={
-            currentWork || {
-              id: "pending",
-              name: "作品生成中",
-              detailInspo: "正在生成设计灵感...",
-              detailMeaning: "正在生成寓意说明...",
-              image: jadeImages[0],
-              grade: "--",
+        <div ref={productCardRef}>
+          <ProductCard
+            work={
+              currentWork || {
+                id: "pending",
+                name: "作品生成中",
+                detailInspo: "正在生成设计灵感...",
+                detailMeaning: "正在生成寓意说明...",
+                image: jadeImages[0],
+                grade: "--",
+              }
             }
-          }
-        />
+          />
+        </div>
       </section>
       {currentWork?.gradeReason ? (
         <section className="card form-table">
@@ -1583,6 +1709,9 @@ export default function App() {
       ) : null}
       <button type="button" className="btn btn-primary" onClick={handleFavorite}>
         {favorites.some((x) => x.id === currentWork?.id) ? "取消收藏" : "收藏"}
+      </button>
+      <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadProductCard(productCardRef, currentWork, "成品卡片")} disabled={!currentWork}>
+        下载成品卡片
       </button>
       <button type="button" className="btn btn-ghost" onClick={() => navTo("custom")}>
         再次编辑
@@ -2255,8 +2384,15 @@ export default function App() {
             <h1>历史记录详情</h1>
           </header>
           <section className="product-wrap">
-            <ProductCard work={historyDetail} />
+            <div ref={historyCardRef}>
+              <ProductCard work={historyDetail} />
+            </div>
           </section>
+          {historyDetail ? (
+            <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadProductCard(historyCardRef, historyDetail, "历史记录卡片")}>
+              下载历史卡片
+            </button>
+          ) : null}
           {historyDetail ? (
             <button type="button" className="btn btn-ghost" onClick={() => handleDeleteHistory(historyDetail.id)}>
               删除这条历史
@@ -2281,8 +2417,15 @@ export default function App() {
             <h1>收藏详情</h1>
           </header>
           <section className="product-wrap">
-            <ProductCard work={favoriteDetail} />
+            <div ref={favoriteCardRef}>
+              <ProductCard work={favoriteDetail} />
+            </div>
           </section>
+          {favoriteDetail ? (
+            <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadProductCard(favoriteCardRef, favoriteDetail, "收藏卡片")}>
+              下载收藏卡片
+            </button>
+          ) : null}
           {favoriteDetail ? (
             <button type="button" className="btn btn-ghost" onClick={() => handleDeleteFavorite(favoriteDetail.id)}>
               删除这条收藏
@@ -2306,6 +2449,9 @@ export default function App() {
               <h3>{museumDetail.title}</h3>
               <p className="muted tiny">发布时间：{formatTime(museumDetail.created_at)}</p>
               <p>{museumDetail.description}</p>
+              <button type="button" className="btn btn-ghost" onClick={() => void handleDownloadMuseumImage(museumDetail)}>
+                下载原图
+              </button>
             </article>
           ) : (
             <p className="muted">暂无详情内容</p>
