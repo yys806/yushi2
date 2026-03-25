@@ -19,9 +19,33 @@ const options = {
 
 const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const ADMIN_TOKEN_STORAGE_KEY = "shenyu_admin_token";
-const MUSEUM_UPLOAD_MAX_MB = 15;
-const MUSEUM_UPLOAD_MAX_DIMENSION = 1800;
-const MUSEUM_UPLOAD_MAX_OUTPUT_MB = 3;
+const AUTH_TOTAL_BUDGET_MS = 45000;
+const AUTH_SINGLE_ATTEMPT_TIMEOUT_MS = 10000;
+const AUTH_MAX_ATTEMPTS = 3;
+const LIST_PAGE_SIZE = 12;
+const DATA_CACHE_TTL_MS = 90 * 1000;
+
+function readTimedCache(key, maxAgeMs = DATA_CACHE_TTL_MS) {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const ts = Number(parsed?.ts || 0);
+    if (!ts || Date.now() - ts > maxAgeMs) return null;
+    return parsed?.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeTimedCache(key, data) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+  } catch {
+  }
+}
 
 function parseJsonSafe(raw) {
   if (!raw) return {};
@@ -30,6 +54,38 @@ function parseJsonSafe(raw) {
   } catch {
     return {};
   }
+}
+
+async function withTimeout(promise, ms, label) {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = window.setTimeout(() => {
+      reject(new Error(`${label}超时，请稍后重试`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
+}
+
+function isTimeoutMessage(message) {
+  return String(message || "").includes("超时");
+}
+
+function isRetryableAuthMessage(message) {
+  const msg = String(message || "").toLowerCase();
+  return (
+    msg.includes("超时") ||
+    msg.includes("timeout") ||
+    msg.includes("upstream request timeout") ||
+    msg.includes("database timeout") ||
+    msg.includes("internal server error") ||
+    msg.includes("fetch") ||
+    msg.includes("network") ||
+    msg.includes("service")
+  );
 }
 
 function isAuthFailure(message) {
@@ -113,68 +169,6 @@ function resolvePendingGrade(work, weights, stable = true) {
     grade,
     gradeReason: reason,
   };
-}
-
-function safeFileName(value) {
-  return String(value || "图片")
-    .trim()
-    .replace(/[\\/:*?"<>|\s]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 64) || "图片";
-}
-
-function readImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error("图片读取失败"));
-    };
-    img.src = objectUrl;
-  });
-}
-
-async function compressImageFile(file) {
-  if (!file?.type?.startsWith("image/")) {
-    throw new Error("请上传图片文件");
-  }
-
-  const originalSizeMb = file.size / (1024 * 1024);
-  if (originalSizeMb <= 1.2) {
-    return file;
-  }
-
-  const img = await readImageFromFile(file);
-  const ratio = Math.min(1, MUSEUM_UPLOAD_MAX_DIMENSION / Math.max(img.width, img.height));
-  const targetW = Math.max(1, Math.round(img.width * ratio));
-  const targetH = Math.max(1, Math.round(img.height * ratio));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("图片压缩失败");
-  ctx.drawImage(img, 0, 0, targetW, targetH);
-
-  const toBlob = (quality) =>
-    new Promise((resolve) => {
-      canvas.toBlob((blob) => resolve(blob), "image/webp", quality);
-    });
-
-  let quality = 0.88;
-  let blob = await toBlob(quality);
-  while (blob && blob.size > MUSEUM_UPLOAD_MAX_OUTPUT_MB * 1024 * 1024 && quality > 0.5) {
-    quality -= 0.1;
-    blob = await toBlob(quality);
-  }
-
-  if (!blob) throw new Error("图片压缩失败");
-  return new File([blob], `${safeFileName(file.name.replace(/\.[^.]+$/, ""))}.webp`, { type: "image/webp" });
 }
 
 function mapWork(item) {
@@ -325,6 +319,10 @@ export default function App() {
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
   const [favorites, setFavorites] = useState([]);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [favoritesHasMore, setFavoritesHasMore] = useState(false);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+  const [loadingMoreFavorites, setLoadingMoreFavorites] = useState(false);
   const [currentWork, setCurrentWork] = useState(null);
   const [applications, setApplications] = useState([]);
   const [notices, setNotices] = useState([]);
@@ -366,8 +364,14 @@ export default function App() {
   const [applyLoading, setApplyLoading] = useState(false);
   const [noticeRefreshing, setNoticeRefreshing] = useState(false);
   const [museumRefreshing, setMuseumRefreshing] = useState(false);
-  const [museumForm, setMuseumForm] = useState({ category: "natural", title: "", description: "" });
-  const [museumFile, setMuseumFile] = useState(null);
+  const [museumForm, setMuseumForm] = useState({ category: "natural", title: "", description: "", imageUrl: "" });
+  const authForceTimerRef = useRef(null);
+  const authCooldownUntilRef = useRef(0);
+  const worksRefreshInFlightRef = useRef(new Map());
+  const noticesRefreshInFlightRef = useRef(new Map());
+  const refreshWorksAndFavoritesRef = useRef(async () => null);
+  const historyOffsetRef = useRef(0);
+  const favoritesOffsetRef = useRef(0);
   const [gradeWeights, setGradeWeights] = useState(() => normalizeGradeWeights({ s: 1, a: 10, b: 30, c: 50 }));
 
   const [custom, setCustom] = useState({
@@ -399,6 +403,23 @@ export default function App() {
       setIsland({ visible: false, message: "" });
       islandTimerRef.current = null;
     }, 1800);
+  }, []);
+
+  const worksFavoritesCacheKey = useCallback((uid) => `yushi2:wf:${uid}`, []);
+  const noticesCacheKey = useCallback((uid) => `yushi2:na:${uid}`, []);
+
+  const applyWorksAndFavoritesState = useCallback((mappedHistory, mappedFav, hasMoreHistory, hasMoreFavorites) => {
+    setHistory(mappedHistory);
+    setFavorites(mappedFav);
+    setHistoryHasMore(Boolean(hasMoreHistory));
+    setFavoritesHasMore(Boolean(hasMoreFavorites));
+    setCurrentWork((prev) => {
+      if (prev?.id) {
+        const matched = mappedHistory.find((row) => row.id === prev.id);
+        if (matched) return matched;
+      }
+      return mappedHistory[0] || null;
+    });
   }, []);
 
   const navTo = (next) => {
@@ -461,15 +482,19 @@ export default function App() {
     try {
       const email = adminForm.email.trim();
       const password = adminForm.password;
-      const resp = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
-        method: "POST",
-        headers: {
-          apikey: supabaseAnonKey,
-          Authorization: `Bearer ${supabaseAnonKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email, password }),
-      });
+      const resp = await withTimeout(
+        fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
+          method: "POST",
+          headers: {
+            apikey: supabaseAnonKey,
+            Authorization: `Bearer ${supabaseAnonKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ email, password }),
+        }),
+        12000,
+        "管理员登录请求"
+      );
       const raw = await resp.text();
       const parsed = parseJsonSafe(raw);
       if (!resp.ok || !parsed?.access_token) {
@@ -477,15 +502,19 @@ export default function App() {
       }
 
       const token = parsed.access_token;
-      const dashResp = await fetch(`${supabaseUrl}/functions/v1/admin-dashboard`, {
-        method: "POST",
-        headers: {
-          apikey: supabaseAnonKey,
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({}),
-      });
+      const dashResp = await withTimeout(
+        fetch(`${supabaseUrl}/functions/v1/admin-dashboard`, {
+          method: "POST",
+          headers: {
+            apikey: supabaseAnonKey,
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({}),
+        }),
+        12000,
+        "后台校验请求"
+      );
       const dashRaw = await dashResp.text();
       const dashData = parseJsonSafe(dashRaw);
       if (!dashResp.ok) {
@@ -525,10 +554,106 @@ export default function App() {
     setActivityDraft({ title: "", content: "", rewardTimes: 10, targetUserId: "" });
     setQuotaAdjustMap({});
     setGradeDraft({ sWeight: 1, aWeight: 10, bWeight: 30, cWeight: 50 });
-    setMuseumForm({ category: "natural", title: "", description: "" });
-    setMuseumFile(null);
+    setMuseumForm({ category: "natural", title: "", description: "", imageUrl: "" });
     setAdminForm((prev) => ({ ...prev, password: "" }));
   };
+
+  const recoverSessionAfterTimeout = useCallback(async (email) => {
+    const target = String(email || "").trim().toLowerCase();
+    for (let i = 0; i < 3; i += 1) {
+      const { data } = await supabase.auth.getSession();
+      const sessionUser = data?.session?.user;
+      const sessionEmail = String(sessionUser?.email || "").trim().toLowerCase();
+      if (sessionUser && (!target || sessionEmail === target)) {
+        return true;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 320));
+    }
+    return false;
+  }, []);
+
+  const signInWithFallback = useCallback(async (email, password) => {
+    let lastError = null;
+    const startedAt = Date.now();
+    for (let attempt = 0; attempt < AUTH_MAX_ATTEMPTS; attempt += 1) {
+      const elapsed = Date.now() - startedAt;
+      const remaining = AUTH_TOTAL_BUDGET_MS - elapsed;
+      if (remaining <= 0) {
+        break;
+      }
+
+      const timeoutMs = Math.max(3500, Math.min(AUTH_SINGLE_ATTEMPT_TIMEOUT_MS, remaining));
+
+      try {
+        const { error } = await withTimeout(
+          supabase.auth.signInWithPassword({ email, password }),
+          timeoutMs,
+          `登录请求(第${attempt + 1}次)`
+        );
+        if (error) throw error;
+        return;
+      } catch (e) {
+        const message = e?.message || "登录失败";
+        lastError = e;
+        if (!isRetryableAuthMessage(message)) throw e;
+        setError(`登录服务波动，正在第 ${attempt + 1}/${AUTH_MAX_ATTEMPTS} 次重试...`);
+
+        try {
+          const tokenElapsed = Date.now() - startedAt;
+          const tokenRemaining = AUTH_TOTAL_BUDGET_MS - tokenElapsed;
+          if (tokenRemaining <= 3000) {
+            throw new Error("登录请求超时，请稍后重试");
+          }
+          const tokenTimeoutMs = Math.max(3500, Math.min(AUTH_SINGLE_ATTEMPT_TIMEOUT_MS, tokenRemaining));
+          const tokenResp = await withTimeout(
+            fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
+              method: "POST",
+              headers: {
+                apikey: supabaseAnonKey,
+                Authorization: `Bearer ${supabaseAnonKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ email, password }),
+            }),
+            tokenTimeoutMs,
+            `登录重试请求(第${attempt + 1}次)`
+          );
+          const raw = await tokenResp.text();
+          const parsed = parseJsonSafe(raw);
+          if (tokenResp.ok && parsed?.access_token && parsed?.refresh_token) {
+            const { error: setErr } = await supabase.auth.setSession({
+              access_token: parsed.access_token,
+              refresh_token: parsed.refresh_token,
+            });
+            if (!setErr) return;
+            lastError = setErr;
+          } else {
+            const errMsg = String(parsed?.msg || parsed?.error_description || parsed?.message || "登录失败");
+            if (!isRetryableAuthMessage(errMsg)) {
+              throw new Error(errMsg);
+            }
+            lastError = new Error(errMsg);
+          }
+        } catch (tokenErr) {
+          lastError = tokenErr;
+          const tokenMessage = tokenErr?.message || "登录失败";
+          if (!isRetryableAuthMessage(tokenMessage)) throw tokenErr;
+        }
+
+        const recovered = await recoverSessionAfterTimeout(email);
+        if (recovered) return;
+        const postElapsed = Date.now() - startedAt;
+        const postRemaining = AUTH_TOTAL_BUDGET_MS - postElapsed;
+        if (postRemaining <= 1500) break;
+        const wait = Math.min(2200, 450 * (2 ** attempt)) + Math.floor(Math.random() * 280);
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(wait, postRemaining - 900)));
+      }
+    }
+    const fallbackMessage = isRetryableAuthMessage(lastError?.message)
+      ? "登录请求超时，请稍后重试"
+      : "登录失败";
+    throw lastError || new Error(fallbackMessage);
+  }, [recoverSessionAfterTimeout]);
 
   const rateWorkWithRetry = useCallback(async (workId, retry = 3) => {
     if (!workId) return null;
@@ -549,36 +674,35 @@ export default function App() {
     setLoadingData(true);
     setError("");
 
+    const wfCache = readTimedCache(worksFavoritesCacheKey(u.id));
+    if (wfCache) {
+      setGradeWeights(normalizeGradeWeights(wfCache.gradeWeights));
+      applyWorksAndFavoritesState(
+        Array.isArray(wfCache.history) ? wfCache.history : [],
+        Array.isArray(wfCache.favorites) ? wfCache.favorites : [],
+        wfCache.historyHasMore,
+        wfCache.favoritesHasMore
+      );
+    }
+
+    const naCache = readTimedCache(noticesCacheKey(u.id));
+    if (naCache) {
+      setApplications(Array.isArray(naCache.applications) ? naCache.applications : []);
+      setNotices(Array.isArray(naCache.notices) ? naCache.notices : []);
+      setMessageReads(Array.isArray(naCache.messageReads) ? naCache.messageReads : []);
+      setRewardClaims(Array.isArray(naCache.rewardClaims) ? naCache.rewardClaims : []);
+      if (naCache.profile) setProfile(naCache.profile);
+    }
+
     try {
-      const { data: profileRow, error: profileErr } = await supabase
-        .from("user_profiles")
-        .select("id,email,nickname,quota_total,quota_used,is_admin")
-        .eq("id", u.id)
-        .maybeSingle();
+      const wfTask = refreshWorksAndFavoritesRef.current(u, { useCache: false, showError: false });
 
-      if (profileErr) throw profileErr;
-
-      setProfile({
-        id: profileRow?.id,
-        email: profileRow?.email || u.email || "",
-        nickname: profileRow?.nickname || u.user_metadata?.nickname || "用户",
-        quotaTotal: profileRow?.quota_total ?? 5,
-        quotaUsed: profileRow?.quota_used ?? 0,
-        quotaRemaining: profileRow?.is_admin ? -1 : Math.max(0, (profileRow?.quota_total ?? 5) - (profileRow?.quota_used ?? 0)),
-        isAdmin: Boolean(profileRow?.is_admin),
-      });
-
-      const [worksRes, favRes, appRes, noticeRes, readRes, claimRes, museumRes, gradeConfigRes] = await Promise.all([
+      const [profileRes, appRes, noticeRes, readRes, claimRes] = await Promise.all([
         supabase
-          .from("works")
-          .select("*")
-          .eq("user_id", u.id)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("favorites")
-          .select("work_id, works(*)")
-          .eq("user_id", u.id)
-          .order("created_at", { ascending: false }),
+          .from("user_profiles")
+          .select("id,email,nickname,quota_total,quota_used,is_admin")
+          .eq("id", u.id)
+          .maybeSingle(),
         supabase
           .from("quota_applications")
           .select("id,applicant_name,apply_reason,requested_times,status,review_note,created_at,reviewed_at")
@@ -600,12 +724,89 @@ export default function App() {
           .from("reward_claims")
           .select("notice_id,claimed_at,reward_times")
           .eq("user_id", u.id),
+      ]);
+
+      if (profileRes.error) throw profileRes.error;
+      if (appRes.error) throw appRes.error;
+      if (noticeRes.error) throw noticeRes.error;
+      if (readRes.error && !isMissingRelationError(readRes.error)) throw readRes.error;
+      if (claimRes.error && !isMissingRelationError(claimRes.error)) throw claimRes.error;
+
+      const profileRow = profileRes.data;
+      const nextProfile = {
+        id: profileRow?.id,
+        email: profileRow?.email || u.email || "",
+        nickname: profileRow?.nickname || u.user_metadata?.nickname || "用户",
+        quotaTotal: profileRow?.quota_total ?? 5,
+        quotaUsed: profileRow?.quota_used ?? 0,
+        quotaRemaining: profileRow?.is_admin ? -1 : Math.max(0, (profileRow?.quota_total ?? 5) - (profileRow?.quota_used ?? 0)),
+        isAdmin: Boolean(profileRow?.is_admin),
+      };
+      setProfile(nextProfile);
+
+      const nextApplications = appRes.data || [];
+      const nextNotices = noticeRes.data || [];
+      const nextMessageReads = readRes.error ? [] : readRes.data || [];
+      const nextRewardClaims = claimRes.error ? [] : claimRes.data || [];
+
+      setApplications(nextApplications);
+      setNotices(nextNotices);
+      setMessageReads(nextMessageReads);
+      setRewardClaims(nextRewardClaims);
+
+      writeTimedCache(noticesCacheKey(u.id), {
+        profile: nextProfile,
+        applications: nextApplications,
+        notices: nextNotices,
+        messageReads: nextMessageReads,
+        rewardClaims: nextRewardClaims,
+      });
+
+      await wfTask;
+    } catch (e) {
+      setError(e?.message || "加载失败");
+    } finally {
+      setLoadingData(false);
+    }
+  }, [applyWorksAndFavoritesState, noticesCacheKey, worksFavoritesCacheKey]);
+
+  const refreshWorksAndFavorites = useCallback(async (u, options = {}) => {
+    if (!u) return null;
+    const { showError = true, useCache = true } = options;
+    if (showError) setError("");
+
+    const cacheKey = worksFavoritesCacheKey(u.id);
+    if (useCache) {
+      const cached = readTimedCache(cacheKey);
+      if (cached) {
+        setGradeWeights(normalizeGradeWeights(cached.gradeWeights));
+        applyWorksAndFavoritesState(
+          Array.isArray(cached.history) ? cached.history : [],
+          Array.isArray(cached.favorites) ? cached.favorites : [],
+          cached.historyHasMore,
+          cached.favoritesHasMore
+        );
+      }
+    }
+
+    const inflightKey = `wf:${u.id}`;
+    const existing = worksRefreshInFlightRef.current.get(inflightKey);
+    if (existing) return existing;
+
+    const task = (async () => {
+      const [worksRes, favRes, gradeConfigRes] = await Promise.all([
         supabase
-          .from("museum_items")
-          .select("id,category,title,description,image_url,created_at")
-          .eq("active", true)
+          .from("works")
+          .select("id,title,material,pattern,inspiration,meaning,image_url,grade,grade_reason,created_at")
+          .eq("user_id", u.id)
           .order("created_at", { ascending: false })
-          .limit(100),
+          .limit(LIST_PAGE_SIZE + 1),
+        supabase
+          .from("favorites")
+          .select("work_id, works(id,title,material,pattern,inspiration,meaning,image_url,grade,grade_reason,created_at)")
+          .eq("user_id", u.id)
+          .order("created_at", { ascending: false })
+          .limit(LIST_PAGE_SIZE + 1),
         supabase
           .from("grade_probabilities")
           .select("s_weight,a_weight,b_weight,c_weight")
@@ -615,11 +816,6 @@ export default function App() {
 
       if (worksRes.error) throw worksRes.error;
       if (favRes.error) throw favRes.error;
-      if (appRes.error) throw appRes.error;
-      if (noticeRes.error) throw noticeRes.error;
-      if (readRes.error && !isMissingRelationError(readRes.error)) throw readRes.error;
-      if (claimRes.error && !isMissingRelationError(claimRes.error)) throw claimRes.error;
-      if (museumRes.error && !isMissingRelationError(museumRes.error)) throw museumRes.error;
       if (gradeConfigRes.error && !isMissingRelationError(gradeConfigRes.error)) throw gradeConfigRes.error;
 
       const activeWeights = normalizeGradeWeights({
@@ -630,38 +826,49 @@ export default function App() {
       });
       setGradeWeights(activeWeights);
 
-      const mappedHistory = (worksRes.data || []).map((row) => resolvePendingGrade(mapWork(row), activeWeights, true));
-      setHistory(mappedHistory);
+      const historyRows = worksRes.data || [];
+      const favoritesRows = favRes.data || [];
+      const nextHistoryHasMore = historyRows.length > LIST_PAGE_SIZE;
+      const nextFavoritesHasMore = favoritesRows.length > LIST_PAGE_SIZE;
 
-      const pendingWorks = (worksRes.data || []).filter((w) => String(w?.grade || "").includes("评级中")).slice(0, 3);
-      if (pendingWorks.length) {
-        void (async () => {
-          let changed = false;
-          for (const row of pendingWorks) {
-            const rated = await rateWorkWithRetry(row.id, 2);
-            if (rated?.grade) changed = true;
-          }
-          if (changed) {
-            await loadUserData(u);
-          }
-        })();
-      }
+      const mappedHistory = historyRows
+        .slice(0, LIST_PAGE_SIZE)
+        .map((row) => resolvePendingGrade(mapWork(row), activeWeights, true));
+      const mappedFav = favoritesRows
+        .slice(0, LIST_PAGE_SIZE)
+        .map((row) => resolvePendingGrade(mapWork(row.works), activeWeights, true));
 
-      const mappedFav = (favRes.data || []).map((row) => resolvePendingGrade(mapWork(row.works), activeWeights, true));
-      setFavorites(mappedFav);
+      applyWorksAndFavoritesState(mappedHistory, mappedFav, nextHistoryHasMore, nextFavoritesHasMore);
+      writeTimedCache(cacheKey, {
+        gradeWeights: activeWeights,
+        history: mappedHistory,
+        favorites: mappedFav,
+        historyHasMore: nextHistoryHasMore,
+        favoritesHasMore: nextFavoritesHasMore,
+      });
+      return {
+        history: mappedHistory,
+        favorites: mappedFav,
+        historyHasMore: nextHistoryHasMore,
+        favoritesHasMore: nextFavoritesHasMore,
+      };
+    })();
 
-      setApplications(appRes.data || []);
-      setNotices(noticeRes.data || []);
-      setMessageReads(readRes.error ? [] : readRes.data || []);
-      setRewardClaims(claimRes.error ? [] : claimRes.data || []);
-      setMuseumItems(museumRes.error ? [] : museumRes.data || []);
-      if (mappedHistory.length && !currentWork) setCurrentWork(mappedHistory[0]);
+    worksRefreshInFlightRef.current.set(inflightKey, task);
+
+    try {
+      return await task;
     } catch (e) {
-      setError(e?.message || "加载失败");
+      if (showError) setError(e?.message || "加载失败");
+      return null;
     } finally {
-      setLoadingData(false);
+      worksRefreshInFlightRef.current.delete(inflightKey);
     }
-  }, [currentWork, rateWorkWithRetry]);
+  }, [applyWorksAndFavoritesState, worksFavoritesCacheKey]);
+
+  useEffect(() => {
+    refreshWorksAndFavoritesRef.current = refreshWorksAndFavorites;
+  }, [refreshWorksAndFavorites]);
 
   useEffect(() => {
     if (!isAdminRoute || typeof window === "undefined") return;
@@ -676,6 +883,10 @@ export default function App() {
     return () => {
       if (islandTimerRef.current) {
         window.clearTimeout(islandTimerRef.current);
+      }
+      if (authForceTimerRef.current) {
+        window.clearTimeout(authForceTimerRef.current);
+        authForceTimerRef.current = null;
       }
     };
   }, []);
@@ -702,6 +913,10 @@ export default function App() {
         setProfile(null);
         setHistory([]);
         setFavorites([]);
+        setHistoryHasMore(false);
+        setFavoritesHasMore(false);
+        setLoadingMoreHistory(false);
+        setLoadingMoreFavorites(false);
         setApplications([]);
         setNotices([]);
         setMessageReads([]);
@@ -728,6 +943,14 @@ export default function App() {
   }, [user, loadUserData]);
 
   useEffect(() => {
+    historyOffsetRef.current = history.length;
+  }, [history.length]);
+
+  useEffect(() => {
+    favoritesOffsetRef.current = favorites.length;
+  }, [favorites.length]);
+
+  useEffect(() => {
     if (page !== "home") return undefined;
     const el = carouselRef.current;
     if (!el) return undefined;
@@ -741,8 +964,24 @@ export default function App() {
   }, [page]);
 
   const handleAuth = async () => {
+    if (loadingAuth) return;
+    const now = Date.now();
+    if (authCooldownUntilRef.current > now) {
+      const left = Math.ceil((authCooldownUntilRef.current - now) / 1000);
+      setError(`登录服务繁忙，请 ${left} 秒后重试`);
+      return;
+    }
     setLoadingAuth(true);
     setError("");
+    if (authForceTimerRef.current) {
+      window.clearTimeout(authForceTimerRef.current);
+      authForceTimerRef.current = null;
+    }
+    authForceTimerRef.current = window.setTimeout(() => {
+      setLoadingAuth(false);
+      setError("登录服务繁忙，请稍后重试");
+      authForceTimerRef.current = null;
+    }, AUTH_TOTAL_BUDGET_MS + 4000);
     try {
       if (authMode === "register") {
         if (!PASSWORD_RULE.test(authForm.password)) {
@@ -759,29 +998,33 @@ export default function App() {
           throw new Error("昵称至少 2 个字，且不能重复");
         }
 
-        const { error: registerError } = await supabase.functions.invoke("signup-user", {
-          body: { email, password, nickname },
-        });
+        const { error: registerError } = await withTimeout(
+          supabase.functions.invoke("signup-user", {
+            body: { email, password, nickname },
+          }),
+          12000,
+          "注册请求"
+        );
         if (registerError) throw registerError;
 
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-        if (signInError) throw signInError;
+        await signInWithFallback(email, password);
       } else {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email: authForm.email.trim(),
-          password: authForm.password,
-        });
-        if (signInError) throw signInError;
+        await signInWithFallback(authForm.email.trim(), authForm.password);
       }
 
       setPage("home");
       setStack([]);
     } catch (e) {
-      setError(e?.message || "登录/注册失败");
+      const message = e?.message || "登录/注册失败";
+      if (isRetryableAuthMessage(message)) {
+        authCooldownUntilRef.current = Date.now() + 90 * 1000;
+      }
+      setError(message);
     } finally {
+      if (authForceTimerRef.current) {
+        window.clearTimeout(authForceTimerRef.current);
+        authForceTimerRef.current = null;
+      }
       setLoadingAuth(false);
     }
   };
@@ -848,7 +1091,18 @@ export default function App() {
 
       setCurrentWork(mapped);
       setHistory((h) => [mapped, ...h]);
-      await loadUserData(user);
+      setHistoryHasMore((prev) => prev || history.length >= LIST_PAGE_SIZE);
+
+      const cacheKey = worksFavoritesCacheKey(user?.id || "");
+      if (user?.id) {
+        writeTimedCache(cacheKey, {
+          gradeWeights,
+          history: [mapped, ...history],
+          favorites,
+          historyHasMore: historyHasMore || history.length >= LIST_PAGE_SIZE,
+          favoritesHasMore,
+        });
+      }
     } catch (e) {
       setError(e?.message || "生成失败");
     } finally {
@@ -863,9 +1117,12 @@ export default function App() {
   const handleFavorite = async () => {
     if (!currentWork || !user) return;
     setError("");
+    const previousFavorites = favorites;
     try {
       const exists = favorites.some((x) => x.id === currentWork.id);
       if (exists) {
+        setFavorites((prev) => prev.filter((item) => item.id !== currentWork.id));
+        if (selectedFavoriteId === currentWork.id) setSelectedFavoriteId("");
         const { error: delErr } = await supabase
           .from("favorites")
           .delete()
@@ -874,6 +1131,7 @@ export default function App() {
         if (delErr) throw delErr;
         showIsland("已取消收藏");
       } else {
+        setFavorites((prev) => [currentWork, ...prev]);
         const { error: insertErr } = await supabase.from("favorites").insert({
           user_id: user.id,
           work_id: currentWork.id,
@@ -882,8 +1140,15 @@ export default function App() {
         showIsland("收藏成功");
       }
 
-      await loadUserData(user);
+      writeTimedCache(worksFavoritesCacheKey(user.id), {
+        gradeWeights,
+        history,
+        favorites: exists ? previousFavorites.filter((item) => item.id !== currentWork.id) : [currentWork, ...previousFavorites],
+        historyHasMore,
+        favoritesHasMore,
+      });
     } catch (e) {
+      setFavorites(previousFavorites);
       setError(e?.message || "收藏失败");
     }
   };
@@ -892,13 +1157,30 @@ export default function App() {
     if (!user || !workId) return;
     if (!window.confirm("确定删除这条历史记录吗？")) return;
     setError("");
+    const previousHistory = history;
+    const previousFavorites = favorites;
     try {
+      const nextHistory = previousHistory.filter((item) => item.id !== workId);
+      const nextFavorites = previousFavorites.filter((item) => item.id !== workId);
+      setHistory(nextHistory);
+      setFavorites(nextFavorites);
+      if (selectedHistoryId === workId) setSelectedHistoryId("");
+      if (selectedFavoriteId === workId) setSelectedFavoriteId("");
       const { error: delErr } = await supabase.from("works").delete().eq("user_id", user.id).eq("id", workId);
       if (delErr) throw delErr;
       if (currentWork?.id === workId) setCurrentWork(null);
-      await loadUserData(user);
+
+      writeTimedCache(worksFavoritesCacheKey(user.id), {
+        gradeWeights,
+        history: nextHistory,
+        favorites: nextFavorites,
+        historyHasMore,
+        favoritesHasMore,
+      });
       showIsland("历史已删除");
     } catch (e) {
+      setHistory(previousHistory);
+      setFavorites(previousFavorites);
       setError(e?.message || "删除失败");
     }
   };
@@ -907,17 +1189,99 @@ export default function App() {
     if (!user || !workId) return;
     if (!window.confirm("确定删除这条收藏吗？")) return;
     setError("");
+    const previousFavorites = favorites;
     try {
+      const nextFavorites = previousFavorites.filter((item) => item.id !== workId);
+      setFavorites(nextFavorites);
+      if (selectedFavoriteId === workId) setSelectedFavoriteId("");
       const { error: delErr } = await supabase
         .from("favorites")
         .delete()
         .eq("user_id", user.id)
         .eq("work_id", workId);
       if (delErr) throw delErr;
-      await loadUserData(user);
+
+      writeTimedCache(worksFavoritesCacheKey(user.id), {
+        gradeWeights,
+        history,
+        favorites: nextFavorites,
+        historyHasMore,
+        favoritesHasMore,
+      });
       showIsland("收藏已删除");
     } catch (e) {
+      setFavorites(previousFavorites);
       setError(e?.message || "删除失败");
+    }
+  };
+
+  const loadMoreHistory = async () => {
+    if (!user || loadingMoreHistory || !historyHasMore) return;
+    setLoadingMoreHistory(true);
+    setError("");
+    try {
+      const from = historyOffsetRef.current;
+      const to = from + LIST_PAGE_SIZE;
+      const { data, error: worksErr } = await supabase
+        .from("works")
+        .select("id,title,material,pattern,inspiration,meaning,image_url,grade,grade_reason,created_at")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .range(from, to);
+      if (worksErr) throw worksErr;
+
+      const rows = data || [];
+      const hasMore = rows.length > LIST_PAGE_SIZE;
+      const appendRows = rows.slice(0, LIST_PAGE_SIZE).map((row) => resolvePendingGrade(mapWork(row), gradeWeights, true));
+      const nextHistory = [...history, ...appendRows.filter((row) => !history.some((h) => h.id === row.id))];
+      setHistory(nextHistory);
+      setHistoryHasMore(hasMore);
+      writeTimedCache(worksFavoritesCacheKey(user.id), {
+        gradeWeights,
+        history: nextHistory,
+        favorites,
+        historyHasMore: hasMore,
+        favoritesHasMore,
+      });
+    } catch (e) {
+      setError(e?.message || "历史加载失败");
+    } finally {
+      setLoadingMoreHistory(false);
+    }
+  };
+
+  const loadMoreFavorites = async () => {
+    if (!user || loadingMoreFavorites || !favoritesHasMore) return;
+    setLoadingMoreFavorites(true);
+    setError("");
+    try {
+      const from = favoritesOffsetRef.current;
+      const to = from + LIST_PAGE_SIZE;
+      const { data, error: favErr } = await supabase
+        .from("favorites")
+        .select("work_id, works(id,title,material,pattern,inspiration,meaning,image_url,grade,grade_reason,created_at)")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .range(from, to);
+      if (favErr) throw favErr;
+
+      const rows = data || [];
+      const hasMore = rows.length > LIST_PAGE_SIZE;
+      const appendRows = rows.slice(0, LIST_PAGE_SIZE).map((row) => resolvePendingGrade(mapWork(row.works), gradeWeights, true));
+      const nextFavorites = [...favorites, ...appendRows.filter((row) => !favorites.some((f) => f.id === row.id))];
+      setFavorites(nextFavorites);
+      setFavoritesHasMore(hasMore);
+      writeTimedCache(worksFavoritesCacheKey(user.id), {
+        gradeWeights,
+        history,
+        favorites: nextFavorites,
+        historyHasMore,
+        favoritesHasMore: hasMore,
+      });
+    } catch (e) {
+      setError(e?.message || "收藏加载失败");
+    } finally {
+      setLoadingMoreFavorites(false);
     }
   };
 
@@ -944,7 +1308,7 @@ export default function App() {
       const { error: updateErr } = await supabase.from("user_profiles").update({ nickname }).eq("id", user.id);
       if (updateErr) throw updateErr;
       await supabase.auth.updateUser({ data: { ...user.user_metadata, nickname } });
-      await loadUserData(user);
+      setProfile((prev) => (prev ? { ...prev, nickname } : prev));
       showIsland("昵称已更新");
     } catch (e) {
       setError(e?.message || "昵称更新失败");
@@ -1019,7 +1383,7 @@ export default function App() {
       setApplyDialogOpen(false);
       setApplyForm({ applicantName: "", reason: "" });
       showIsland("申请提交成功");
-      await loadUserData(user);
+      await refreshNoticesAndApplications();
     } catch (e) {
       setError(e?.message || "申请提交失败");
     } finally {
@@ -1059,38 +1423,59 @@ export default function App() {
     }
   }, [adminInvoke, adminToken]);
 
-  const refreshNoticesAndApplications = useCallback(async () => {
-    if (!user) return;
-    setNoticeRefreshing(true);
-    setError("");
-    try {
+  const refreshNoticesAndApplications = useCallback(async (sourceUser = user, options = {}) => {
+    if (!sourceUser) return null;
+    const { showToast = true, useCache = true, showRefreshing = true, showError = true } = options;
+    if (showRefreshing) setNoticeRefreshing(true);
+    if (showError) setError("");
+
+    const cacheKey = noticesCacheKey(sourceUser.id);
+    if (useCache) {
+      const cached = readTimedCache(cacheKey);
+      if (cached) {
+        if (cached.profile) setProfile(cached.profile);
+        setApplications(Array.isArray(cached.applications) ? cached.applications : []);
+        setNotices(Array.isArray(cached.notices) ? cached.notices : []);
+        setMessageReads(Array.isArray(cached.messageReads) ? cached.messageReads : []);
+        setRewardClaims(Array.isArray(cached.rewardClaims) ? cached.rewardClaims : []);
+      }
+    }
+
+    const inflightKey = `na:${sourceUser.id}`;
+    const existing = noticesRefreshInFlightRef.current.get(inflightKey);
+    if (existing) {
+      if (showRefreshing) setNoticeRefreshing(false);
+      return existing;
+    }
+
+    const task = (async () => {
       const [profileRes, appRes, noticeRes, readRes, claimRes] = await Promise.all([
         supabase
           .from("user_profiles")
           .select("id,email,nickname,quota_total,quota_used,is_admin")
-          .eq("id", user.id)
+          .eq("id", sourceUser.id)
           .maybeSingle(),
         supabase
           .from("quota_applications")
           .select("id,applicant_name,apply_reason,requested_times,status,review_note,created_at,reviewed_at")
-          .eq("user_id", user.id)
+          .eq("user_id", sourceUser.id)
           .order("created_at", { ascending: false })
           .limit(20),
         supabase
           .from("notices")
           .select("id,title,content,kind,reward_times,target_user_id,created_at")
           .eq("active", true)
-          .or(`target_user_id.is.null,target_user_id.eq.${user.id}`)
+          .or(`target_user_id.is.null,target_user_id.eq.${sourceUser.id}`)
           .order("created_at", { ascending: false })
           .limit(10),
         supabase
           .from("message_reads")
           .select("message_type,message_id,read_at")
-          .eq("user_id", user.id),
+          .eq("user_id", sourceUser.id),
         supabase
           .from("reward_claims")
           .select("notice_id,claimed_at,reward_times")
-          .eq("user_id", user.id),
+          .eq("user_id", sourceUser.id),
       ]);
 
       if (profileRes.error) throw profileRes.error;
@@ -1100,29 +1485,57 @@ export default function App() {
       if (claimRes.error && !isMissingRelationError(claimRes.error)) throw claimRes.error;
 
       const profileRow = profileRes.data;
-      if (profileRow) {
-        setProfile({
-          id: profileRow.id,
-          email: profileRow.email || user.email || "",
-          nickname: profileRow.nickname || user.user_metadata?.nickname || "用户",
-          quotaTotal: profileRow.quota_total ?? 5,
-          quotaUsed: profileRow.quota_used ?? 0,
-          quotaRemaining: profileRow.is_admin ? -1 : Math.max(0, (profileRow.quota_total ?? 5) - (profileRow.quota_used ?? 0)),
-          isAdmin: Boolean(profileRow.is_admin),
-        });
-      }
+      const nextProfile = profileRow
+        ? {
+            id: profileRow.id,
+            email: profileRow.email || sourceUser.email || "",
+            nickname: profileRow.nickname || sourceUser.user_metadata?.nickname || "用户",
+            quotaTotal: profileRow.quota_total ?? 5,
+            quotaUsed: profileRow.quota_used ?? 0,
+            quotaRemaining: profileRow.is_admin ? -1 : Math.max(0, (profileRow.quota_total ?? 5) - (profileRow.quota_used ?? 0)),
+            isAdmin: Boolean(profileRow.is_admin),
+          }
+        : null;
 
-      setApplications(appRes.data || []);
-      setNotices(noticeRes.data || []);
-      setMessageReads(readRes.error ? [] : readRes.data || []);
-      setRewardClaims(claimRes.error ? [] : claimRes.data || []);
-      showIsland("消息已刷新");
+      const nextApplications = appRes.data || [];
+      const nextNotices = noticeRes.data || [];
+      const nextMessageReads = readRes.error ? [] : readRes.data || [];
+      const nextRewardClaims = claimRes.error ? [] : claimRes.data || [];
+
+      if (nextProfile) setProfile(nextProfile);
+      setApplications(nextApplications);
+      setNotices(nextNotices);
+      setMessageReads(nextMessageReads);
+      setRewardClaims(nextRewardClaims);
+
+      writeTimedCache(cacheKey, {
+        profile: nextProfile,
+        applications: nextApplications,
+        notices: nextNotices,
+        messageReads: nextMessageReads,
+        rewardClaims: nextRewardClaims,
+      });
+
+      if (showToast) showIsland("消息已刷新");
+      return {
+        profile: nextProfile,
+        applications: nextApplications,
+        notices: nextNotices,
+      };
+    })();
+
+    noticesRefreshInFlightRef.current.set(inflightKey, task);
+
+    try {
+      return await task;
     } catch (e) {
-      setError(e?.message || "消息刷新失败");
+      if (showError) setError(e?.message || "消息刷新失败");
+      return null;
     } finally {
-      setNoticeRefreshing(false);
+      noticesRefreshInFlightRef.current.delete(inflightKey);
+      if (showRefreshing) setNoticeRefreshing(false);
     }
-  }, [user, showIsland]);
+  }, [noticesCacheKey, showIsland, user]);
 
   const refreshMuseum = useCallback(async () => {
     setMuseumRefreshing(true);
@@ -1160,7 +1573,7 @@ export default function App() {
       });
       setReviewNote("");
       showIsland(decision === "approved" ? "审批已通过" : "审批已驳回");
-      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
+      await Promise.all([loadAdminDashboard(), user ? refreshNoticesAndApplications() : Promise.resolve()]);
     } catch (e) {
       const message = e?.message || "审批失败";
       setAdminError(message);
@@ -1186,7 +1599,7 @@ export default function App() {
       });
       setNoticeDraft({ title: "", content: "", kind: "normal", targetUserId: "" });
       showIsland("通知已发布");
-      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
+      await Promise.all([loadAdminDashboard(), user ? refreshNoticesAndApplications() : Promise.resolve()]);
     } catch (e) {
       const message = e?.message || "通知发布失败";
       setAdminError(message);
@@ -1225,55 +1638,31 @@ export default function App() {
   };
 
   const handlePublishMuseumItem = async () => {
-    if (!museumFile || !museumForm.title.trim() || !museumForm.description.trim()) {
+    const title = museumForm.title.trim();
+    const description = museumForm.description.trim();
+    const imageUrl = museumForm.imageUrl.trim();
+    if (!title || !description || !imageUrl) {
       setAdminError("发布前必须填写图片、标题、说明");
       return;
     }
 
-    if (!museumFile.type?.startsWith("image/")) {
-      setAdminError("仅支持图片文件上传");
-      return;
-    }
-
-    if (museumFile.size > MUSEUM_UPLOAD_MAX_MB * 1024 * 1024) {
-      setAdminError(`原图不能超过 ${MUSEUM_UPLOAD_MAX_MB}MB，请压缩后再上传`);
+    if (!/^https?:\/\//i.test(imageUrl)) {
+      setAdminError("图片链接必须以 http:// 或 https:// 开头");
       return;
     }
 
     setAdminError("");
     setAdminActionLoading(true);
     try {
-      const uploadFile = await compressImageFile(museumFile);
-      const fileName = uploadFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const objectPath = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${fileName}`;
-      const uploadResp = await fetch(`${supabaseUrl}/storage/v1/object/museum-assets/${objectPath}`, {
-        method: "POST",
-        headers: {
-          apikey: supabaseAnonKey,
-          Authorization: `Bearer ${adminToken}`,
-          "x-upsert": "false",
-          "Content-Type": uploadFile.type || "application/octet-stream",
-        },
-        body: uploadFile,
-      });
-
-      const uploadRaw = await uploadResp.text();
-      const uploadParsed = parseJsonSafe(uploadRaw);
-      if (!uploadResp.ok) {
-        throw new Error(uploadParsed?.message || uploadParsed?.error || `图片上传失败(${uploadResp.status})`);
-      }
-
-      const imageUrl = `${supabaseUrl}/storage/v1/object/public/museum-assets/${objectPath}`;
       await adminInvoke("publish-museum-item", {
         category: museumForm.category,
-        title: museumForm.title.trim(),
-        description: museumForm.description.trim(),
+        title,
+        description,
         imageUrl,
         active: true,
       });
 
-      setMuseumForm({ category: "natural", title: "", description: "" });
-      setMuseumFile(null);
+      setMuseumForm({ category: "natural", title: "", description: "", imageUrl: "" });
       showIsland("玉苑内容已发布");
       await Promise.all([loadAdminDashboard(), refreshMuseum()]);
     } catch (e) {
@@ -1313,7 +1702,7 @@ export default function App() {
     try {
       await adminInvoke("admin-delete-notice", { noticeId });
       showIsland("公告已删除");
-      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
+      await Promise.all([loadAdminDashboard(), user ? refreshNoticesAndApplications() : Promise.resolve()]);
     } catch (e) {
       const message = e?.message || "删除公告失败";
       setAdminError(message);
@@ -1374,15 +1763,22 @@ export default function App() {
   const handleAdminEditMuseumItem = async (item) => {
     const categoryInput = window.prompt("编辑分类（natural=自然玉石，carving=玉雕作品）", item.category || "natural");
     if (categoryInput === null) return;
+    const imageUrlInput = window.prompt("编辑图片链接（http/https）", item.image_url || "");
+    if (imageUrlInput === null) return;
     const title = window.prompt("编辑玉苑标题", item.title || "");
     if (title === null) return;
     const description = window.prompt("编辑玉苑说明", item.description || "");
     if (description === null) return;
     const category = categoryInput.trim() === "carving" ? "carving" : "natural";
+    const imageUrl = imageUrlInput.trim();
     const titleTrimmed = title.trim();
     const descriptionTrimmed = description.trim();
-    if (!titleTrimmed || !descriptionTrimmed) {
-      setAdminError("标题和说明不能为空");
+    if (!titleTrimmed || !descriptionTrimmed || !imageUrl) {
+      setAdminError("图片链接、标题和说明不能为空");
+      return;
+    }
+    if (!/^https?:\/\//i.test(imageUrl)) {
+      setAdminError("图片链接必须以 http:// 或 https:// 开头");
       return;
     }
 
@@ -1392,6 +1788,7 @@ export default function App() {
       await adminInvoke("update-museum-item", {
         itemId: item.id,
         category,
+        imageUrl,
         title: titleTrimmed,
         description: descriptionTrimmed,
       });
@@ -1440,7 +1837,7 @@ export default function App() {
     try {
       await adminInvoke("adjust-user-quota", { targetUserId, quotaTotal });
       showIsland("用户额度已调整");
-      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
+      await Promise.all([loadAdminDashboard(), user ? refreshNoticesAndApplications() : Promise.resolve()]);
     } catch (e) {
       const message = e?.message || "调整额度失败";
       setAdminError(message);
@@ -2360,11 +2757,11 @@ export default function App() {
                 <h3 className="section-title">发布玉苑内容</h3>
                 <p className="muted">发布必须包含图片、标题、说明三项。</p>
                 <label className="row-field">
-                  图片（本地上传）
+                  图片链接（外部对象存储）
                   <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setMuseumFile(e.target.files?.[0] || null)}
+                    value={museumForm.imageUrl}
+                    onChange={(e) => setMuseumForm((s) => ({ ...s, imageUrl: e.target.value }))}
+                    placeholder="https://..."
                   />
                 </label>
                 <label className="row-field">
@@ -2416,7 +2813,7 @@ export default function App() {
     );
   };
 
-  const renderListPage = (title, tip, list, onOpen, onDelete) => (
+  const renderListPage = (title, tip, list, onOpen, onDelete, options = {}) => (
     <>
       <header className="sub-top">
         <button type="button" className="back" onClick={navBack}>
@@ -2427,6 +2824,7 @@ export default function App() {
 
       <p className="muted">{tip}</p>
       <section className="list-stack">
+        {!list.length ? <p className="muted">暂无内容</p> : null}
         {list.map((item) => (
           <article key={item.id} className="record-item">
             <button type="button" className="record-open" onClick={() => onOpen(item.id)}>
@@ -2443,6 +2841,11 @@ export default function App() {
             </button>
           </article>
         ))}
+        {options.hasMore ? (
+          <button type="button" className="btn btn-ghost" disabled={options.loadingMore} onClick={() => void options.onLoadMore?.()}>
+            {options.loadingMore ? "加载中..." : "加载更多"}
+          </button>
+        ) : null}
       </section>
     </>
   );
@@ -2519,7 +2922,11 @@ export default function App() {
       content = renderListPage("历史记录", "点击条目查看详情", history, (id) => {
         setSelectedHistoryId(id);
         navTo("history-detail");
-      }, handleDeleteHistory);
+      }, handleDeleteHistory, {
+        hasMore: historyHasMore,
+        loadingMore: loadingMoreHistory,
+        onLoadMore: loadMoreHistory,
+      });
     }
     if (page === "history-detail") {
       content = (
@@ -2552,7 +2959,11 @@ export default function App() {
       content = renderListPage("我的收藏", "点击收藏条目查看详情", favorites, (id) => {
         setSelectedFavoriteId(id);
         navTo("favorites-detail");
-      }, handleDeleteFavorite);
+      }, handleDeleteFavorite, {
+        hasMore: favoritesHasMore,
+        loadingMore: loadingMoreFavorites,
+        onLoadMore: loadMoreFavorites,
+      });
     }
     if (page === "favorites-detail") {
       content = (
