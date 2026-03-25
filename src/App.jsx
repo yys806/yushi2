@@ -197,6 +197,7 @@ export default function App() {
   const [notices, setNotices] = useState([]);
   const [messageReads, setMessageReads] = useState([]);
   const [activeMessage, setActiveMessage] = useState(null);
+  const [rewardClaims, setRewardClaims] = useState([]);
   const [museumItems, setMuseumItems] = useState([]);
   const [selectedMuseumId, setSelectedMuseumId] = useState("");
 
@@ -216,6 +217,8 @@ export default function App() {
   const [adminPayload, setAdminPayload] = useState({ users: [], applications: [], notices: [], museumItems: [] });
   const [reviewNote, setReviewNote] = useState("");
   const [noticeDraft, setNoticeDraft] = useState({ title: "", content: "", kind: "normal", targetUserId: "" });
+  const [activityDraft, setActivityDraft] = useState({ title: "", content: "", rewardTimes: 10, targetUserId: "" });
+  const [quotaAdjustMap, setQuotaAdjustMap] = useState({});
   const [adminForm, setAdminForm] = useState({ email: "", password: "" });
   const [adminToken, setAdminToken] = useState(() => {
     if (typeof window === "undefined") return "";
@@ -375,6 +378,8 @@ export default function App() {
     setAdminPayload({ users: [], applications: [], notices: [], museumItems: [] });
     setReviewNote("");
     setNoticeDraft({ title: "", content: "", kind: "normal", targetUserId: "" });
+    setActivityDraft({ title: "", content: "", rewardTimes: 10, targetUserId: "" });
+    setQuotaAdjustMap({});
     setMuseumForm({ category: "natural", title: "", description: "" });
     setMuseumFile(null);
     setAdminForm((prev) => ({ ...prev, password: "" }));
@@ -404,7 +409,7 @@ export default function App() {
         isAdmin: Boolean(profileRow?.is_admin),
       });
 
-      const [worksRes, favRes, appRes, noticeRes, readRes, museumRes] = await Promise.all([
+      const [worksRes, favRes, appRes, noticeRes, readRes, claimRes, museumRes] = await Promise.all([
         supabase
           .from("works")
           .select("*")
@@ -423,7 +428,7 @@ export default function App() {
           .limit(20),
         supabase
           .from("notices")
-          .select("id,title,content,kind,target_user_id,created_at")
+          .select("id,title,content,kind,reward_times,target_user_id,created_at")
           .eq("active", true)
           .or(`target_user_id.is.null,target_user_id.eq.${u.id}`)
           .order("created_at", { ascending: false })
@@ -431,6 +436,10 @@ export default function App() {
         supabase
           .from("message_reads")
           .select("message_type,message_id,read_at")
+          .eq("user_id", u.id),
+        supabase
+          .from("reward_claims")
+          .select("notice_id,claimed_at,reward_times")
           .eq("user_id", u.id),
         supabase
           .from("museum_items")
@@ -445,6 +454,7 @@ export default function App() {
       if (appRes.error) throw appRes.error;
       if (noticeRes.error) throw noticeRes.error;
       if (readRes.error && readRes.error.code !== "42P01") throw readRes.error;
+      if (claimRes.error && claimRes.error.code !== "42P01") throw claimRes.error;
       if (museumRes.error && museumRes.error.code !== "42P01") throw museumRes.error;
 
       const mappedHistory = (worksRes.data || []).map(mapWork);
@@ -456,6 +466,7 @@ export default function App() {
       setApplications(appRes.data || []);
       setNotices(noticeRes.data || []);
       setMessageReads(readRes.error ? [] : readRes.data || []);
+      setRewardClaims(claimRes.error ? [] : claimRes.data || []);
       setMuseumItems(museumRes.error ? [] : museumRes.data || []);
       if (mappedHistory.length && !currentWork) setCurrentWork(mappedHistory[0]);
     } catch (e) {
@@ -507,6 +518,7 @@ export default function App() {
         setApplications([]);
         setNotices([]);
         setMessageReads([]);
+        setRewardClaims([]);
         setActiveMessage(null);
         setMuseumItems([]);
         setSelectedMuseumId("");
@@ -850,7 +862,7 @@ export default function App() {
     setNoticeRefreshing(true);
     setError("");
     try {
-      const [profileRes, appRes, noticeRes, readRes] = await Promise.all([
+      const [profileRes, appRes, noticeRes, readRes, claimRes] = await Promise.all([
         supabase
           .from("user_profiles")
           .select("id,email,nickname,quota_total,quota_used,is_admin")
@@ -864,7 +876,7 @@ export default function App() {
           .limit(20),
         supabase
           .from("notices")
-          .select("id,title,content,kind,target_user_id,created_at")
+          .select("id,title,content,kind,reward_times,target_user_id,created_at")
           .eq("active", true)
           .or(`target_user_id.is.null,target_user_id.eq.${user.id}`)
           .order("created_at", { ascending: false })
@@ -873,12 +885,17 @@ export default function App() {
           .from("message_reads")
           .select("message_type,message_id,read_at")
           .eq("user_id", user.id),
+        supabase
+          .from("reward_claims")
+          .select("notice_id,claimed_at,reward_times")
+          .eq("user_id", user.id),
       ]);
 
       if (profileRes.error) throw profileRes.error;
       if (appRes.error) throw appRes.error;
       if (noticeRes.error) throw noticeRes.error;
       if (readRes.error && readRes.error.code !== "42P01") throw readRes.error;
+      if (claimRes.error && claimRes.error.code !== "42P01") throw claimRes.error;
 
       const profileRow = profileRes.data;
       if (profileRow) {
@@ -896,6 +913,7 @@ export default function App() {
       setApplications(appRes.data || []);
       setNotices(noticeRes.data || []);
       setMessageReads(readRes.error ? [] : readRes.data || []);
+      setRewardClaims(claimRes.error ? [] : claimRes.data || []);
       showIsland("消息已刷新");
     } catch (e) {
       setError(e?.message || "消息刷新失败");
@@ -960,6 +978,7 @@ export default function App() {
         title: noticeDraft.title,
         content: noticeDraft.content,
         kind: noticeDraft.kind,
+        rewardTimes: 0,
         targetUserId: noticeDraft.targetUserId || null,
         active: true,
       });
@@ -968,6 +987,32 @@ export default function App() {
       await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
     } catch (e) {
       const message = e?.message || "通知发布失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
+  const handlePublishActivity = async () => {
+    setAdminError("");
+    setAdminActionLoading(true);
+    try {
+      await adminInvoke("publish-notice", {
+        title: activityDraft.title,
+        content: activityDraft.content,
+        kind: "activity",
+        rewardTimes: Number(activityDraft.rewardTimes) || 0,
+        targetUserId: activityDraft.targetUserId || null,
+        active: true,
+      });
+      setActivityDraft({ title: "", content: "", rewardTimes: 10, targetUserId: "" });
+      showIsland("活动已发布");
+      await Promise.all([loadAdminDashboard(), user ? refreshNoticesAndApplications() : Promise.resolve()]);
+    } catch (e) {
+      const message = e?.message || "活动发布失败";
       setAdminError(message);
       if (isAuthFailure(message)) {
         setAdminToken("");
@@ -1074,11 +1119,15 @@ export default function App() {
     if (content === null) return;
     const titleTrimmed = title.trim();
     const contentTrimmed = content.trim();
-    const kindInput = window.prompt("通知类型（announcement=公告橙色，normal=普通白色）", notice.kind || "normal");
+    const kindInput = window.prompt("通知类型（announcement=公告橙色，normal=普通白色，activity=活动奖励）", notice.kind || "normal");
     if (kindInput === null) return;
+    const rewardInput = window.prompt("奖励额度（仅 activity 生效）", String(notice.reward_times || 0));
+    if (rewardInput === null) return;
     const targetUserInput = window.prompt("目标用户ID（留空表示全体用户）", notice.target_user_id || "");
     if (targetUserInput === null) return;
-    const kind = kindInput.trim() === "announcement" ? "announcement" : "normal";
+    const kindRaw = kindInput.trim();
+    const kind = kindRaw === "announcement" || kindRaw === "activity" ? kindRaw : "normal";
+    const rewardTimes = Math.max(0, Math.floor(Number(rewardInput || 0)));
     const targetUserId = targetUserInput.trim() || null;
     if (!titleTrimmed || !contentTrimmed) {
       setAdminError("标题和内容不能为空");
@@ -1093,6 +1142,7 @@ export default function App() {
         title: titleTrimmed,
         content: contentTrimmed,
         kind,
+        rewardTimes,
         targetUserId,
       });
       showIsland("公告已更新");
@@ -1164,6 +1214,31 @@ export default function App() {
     }
   };
 
+  const handleAdjustUserQuota = async (targetUserId) => {
+    const raw = quotaAdjustMap[targetUserId];
+    const quotaTotal = Math.max(0, Math.floor(Number(raw)));
+    if (!Number.isFinite(quotaTotal)) {
+      setAdminError("请输入有效的额度数值");
+      return;
+    }
+
+    setAdminError("");
+    setAdminActionLoading(true);
+    try {
+      await adminInvoke("adjust-user-quota", { targetUserId, quotaTotal });
+      showIsland("用户额度已调整");
+      await Promise.all([loadAdminDashboard(), user ? loadUserData(user) : Promise.resolve()]);
+    } catch (e) {
+      const message = e?.message || "调整额度失败";
+      setAdminError(message);
+      if (isAuthFailure(message)) {
+        setAdminToken("");
+      }
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
   const handlePay = async () => {
     setError("");
     setApplyMessage("");
@@ -1203,10 +1278,20 @@ export default function App() {
     return map;
   }, [messageReads]);
 
+  const rewardClaimMap = useMemo(() => {
+    const map = new Map();
+    (rewardClaims || []).forEach((row) => {
+      map.set(String(row.notice_id), row);
+    });
+    return map;
+  }, [rewardClaims]);
+
   const messageItems = useMemo(() => {
     const noticeItems = (notices || []).map((n) => {
       const key = `notice:${n.id}`;
       const readAt = messageReadMap.get(key);
+      const claim = rewardClaimMap.get(String(n.id));
+      const isActivity = n.kind === "activity";
       return {
         key,
         messageType: "notice",
@@ -1214,7 +1299,11 @@ export default function App() {
         title: n.title,
         content: n.content,
         createdAt: n.created_at,
-        kind: n.kind === "announcement" ? "announcement" : "normal",
+        kind: isActivity ? "activity" : n.kind === "announcement" ? "announcement" : "normal",
+        rewardTimes: Number(n.reward_times || 0),
+        isClaimed: Boolean(claim),
+        claimedAt: claim?.claimed_at || "",
+        targetUserId: n.target_user_id || null,
         isRead: Boolean(readAt),
         readAt,
       };
@@ -1239,7 +1328,7 @@ export default function App() {
     });
 
     return [...noticeItems, ...appItems].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [notices, applications, messageReadMap]);
+  }, [notices, applications, messageReadMap, rewardClaimMap]);
 
   const unreadCount = useMemo(() => messageItems.filter((m) => !m.isRead).length, [messageItems]);
 
@@ -1275,6 +1364,29 @@ export default function App() {
   const handleOpenMessage = async (item) => {
     setActiveMessage(item);
     await markMessageAsRead(item);
+  };
+
+  const handleClaimReward = async (item) => {
+    if (!item || item.kind !== "activity" || item.isClaimed) return;
+    setNoticeRefreshing(true);
+    setError("");
+    try {
+      const { data, error: invokeErr } = await supabase.functions.invoke("claim-reward", {
+        body: { noticeId: item.messageId },
+      });
+      if (invokeErr) throw invokeErr;
+      if (data?.message) {
+        showIsland(data.message);
+      }
+      await refreshNoticesAndApplications();
+      if (activeMessage?.messageId === item.messageId) {
+        setActiveMessage((prev) => (prev ? { ...prev, isClaimed: true } : prev));
+      }
+    } catch (e) {
+      setError(e?.message || "领取失败");
+    } finally {
+      setNoticeRefreshing(false);
+    }
   };
 
   const handleMarkAllRead = async () => {
@@ -1623,10 +1735,11 @@ export default function App() {
           </div>
         </div>
         {messageItems.slice(0, 10).map((item) => (
-          <button key={item.key} type="button" className={`notice-item message-item ${item.kind === "announcement" ? "notice-announcement" : "notice-normal"} ${item.isRead ? "is-read" : "is-unread"}`} onClick={() => void handleOpenMessage(item)}>
+          <button key={item.key} type="button" className={`notice-item message-item ${item.kind === "announcement" || item.kind === "activity" ? "notice-announcement" : "notice-normal"} ${item.isRead ? "is-read" : "is-unread"}`} onClick={() => void handleOpenMessage(item)}>
             {!item.isRead ? <span className="message-dot" /> : null}
             <h4>{item.title}</h4>
             <p>{item.content}</p>
+            {item.kind === "activity" ? <p className="muted tiny">奖励额度：{item.rewardTimes || 0} 次 ｜ {item.isClaimed ? "已领取" : "待领取"}</p> : null}
             <p className="muted tiny">时间：{formatTime(item.createdAt)}</p>
           </button>
         ))}
@@ -1811,13 +1924,14 @@ export default function App() {
             <button type="button" className={`admin-menu-btn ${adminMenu === "approvals" ? "active" : ""}`} onClick={() => setAdminMenu("approvals")}>事项审批</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "users" ? "active" : ""}`} onClick={() => setAdminMenu("users")}>用户管理</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "notices" ? "active" : ""}`} onClick={() => setAdminMenu("notices")}>公告发布</button>
+            <button type="button" className={`admin-menu-btn ${adminMenu === "activities" ? "active" : ""}`} onClick={() => setAdminMenu("activities")}>活动发布</button>
             <button type="button" className={`admin-menu-btn ${adminMenu === "museum" ? "active" : ""}`} onClick={() => setAdminMenu("museum")}>玉苑管理</button>
             <button type="button" className="btn btn-ghost" onClick={handleAdminLogout}>退出后台</button>
           </aside>
 
           <section className="admin-main">
             <header className="admin-topbar">
-            <h1>{adminMenu === "approvals" ? "事项审批" : adminMenu === "users" ? "用户管理" : adminMenu === "notices" ? "公告发布" : "玉苑管理"}</h1>
+            <h1>{adminMenu === "approvals" ? "事项审批" : adminMenu === "users" ? "用户管理" : adminMenu === "notices" ? "公告发布" : adminMenu === "activities" ? "活动发布" : "玉苑管理"}</h1>
             <button type="button" className="btn btn-ghost" onClick={() => void loadAdminDashboard()} disabled={loadingAdmin || adminActionLoading}>刷新数据</button>
           </header>
             {loadingAdmin ? <p className="muted">加载中...</p> : null}
@@ -1858,6 +1972,20 @@ export default function App() {
                     <div>
                       <h4>{u.nickname}（{u.email}）</h4>
                       <p>剩余额度：{u.quota_remaining} 次（总 {u.quota_total} / 已用 {u.quota_used}）</p>
+                      <div className="admin-actions-inline" style={{ marginTop: 8 }}>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={quotaAdjustMap[u.id] ?? u.quota_total}
+                          onChange={(e) => setQuotaAdjustMap((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                          placeholder="调整后的总额度"
+                          style={{ maxWidth: 170 }}
+                        />
+                        <button type="button" className="btn btn-ghost" disabled={adminActionLoading} onClick={() => handleAdjustUserQuota(u.id)}>
+                          调整额度
+                        </button>
+                      </div>
                     </div>
                     <button type="button" className="record-delete" disabled={adminActionLoading} onClick={() => handleAdminDeleteUser(u.id)}>删除用户</button>
                   </article>
@@ -1894,7 +2022,7 @@ export default function App() {
                 </label>
                 <button type="button" className="btn btn-primary" disabled={adminActionLoading} onClick={handlePublishNotice}>发布通知</button>
                 <h3 className="section-title">已发布公告</h3>
-                {(adminPayload.notices || []).slice(0, 20).map((n) => (
+                {(adminPayload.notices || []).filter((n) => n.kind !== "activity").slice(0, 20).map((n) => (
                   <article key={n.id} className="notice-item">
                     <h4>{n.title}</h4>
                     <p>{n.content}</p>
@@ -1903,6 +2031,48 @@ export default function App() {
                     <div className="admin-actions-inline">
                       <button type="button" className="btn btn-ghost" disabled={adminActionLoading} onClick={() => handleAdminEditNotice(n)}>编辑公告</button>
                       <button type="button" className="record-delete" disabled={adminActionLoading} onClick={() => handleAdminDeleteNotice(n.id)}>删除公告</button>
+                    </div>
+                  </article>
+                ))}
+              </section>
+            ) : null}
+
+            {adminMenu === "activities" ? (
+              <section className="card form-table">
+                <h3 className="section-title">发布活动奖励</h3>
+                <label className="row-field">
+                  标题
+                  <input value={activityDraft.title} onChange={(e) => setActivityDraft((s) => ({ ...s, title: e.target.value }))} placeholder="请输入活动标题" />
+                </label>
+                <label className="row-field">
+                  内容
+                  <textarea value={activityDraft.content} onChange={(e) => setActivityDraft((s) => ({ ...s, content: e.target.value }))} placeholder="请输入活动内容" rows={4} />
+                </label>
+                <label className="row-field">
+                  奖励额度
+                  <input type="number" min="1" max="10000" step="1" value={activityDraft.rewardTimes} onChange={(e) => setActivityDraft((s) => ({ ...s, rewardTimes: e.target.value }))} placeholder="输入奖励额度" />
+                </label>
+                <label className="row-field">
+                  发送对象
+                  <select value={activityDraft.targetUserId} onChange={(e) => setActivityDraft((s) => ({ ...s, targetUserId: e.target.value }))}>
+                    <option value="">全体用户</option>
+                    {(adminPayload.users || []).map((u) => (
+                      <option key={u.id} value={u.id}>{u.nickname}（{u.email}）</option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className="btn btn-primary" disabled={adminActionLoading} onClick={handlePublishActivity}>发布活动</button>
+
+                <h3 className="section-title">已发布活动</h3>
+                {(adminPayload.notices || []).filter((n) => n.kind === "activity").slice(0, 30).map((n) => (
+                  <article key={n.id} className="notice-item notice-announcement">
+                    <h4>{n.title}</h4>
+                    <p>{n.content}</p>
+                    <p className="muted tiny">奖励额度：{n.reward_times || 0} 次 ｜ 对象：{n.target_user_id ? (adminUserMap.get(n.target_user_id)?.nickname || n.target_user_id) : "全体用户"}</p>
+                    <p className="muted tiny">发布时间：{formatTime(n.created_at)}</p>
+                    <div className="admin-actions-inline">
+                      <button type="button" className="btn btn-ghost" disabled={adminActionLoading} onClick={() => handleAdminEditNotice(n)}>编辑活动</button>
+                      <button type="button" className="record-delete" disabled={adminActionLoading} onClick={() => handleAdminDeleteNotice(n.id)}>删除活动</button>
                     </div>
                   </article>
                 ))}
@@ -2199,7 +2369,7 @@ export default function App() {
         ) : null}
         {activeMessage ? (
           <div className="modal-backdrop" role="dialog" aria-modal="true">
-            <section className={`modal-card card form-table message-detail ${activeMessage.kind === "announcement" ? "message-detail-announcement" : "message-detail-normal"}`}>
+            <section className={`modal-card card form-table message-detail ${activeMessage.kind === "announcement" || activeMessage.kind === "activity" ? "message-detail-announcement" : "message-detail-normal"}`}>
               <div className="row-between">
                 <h3 className="section-title">{activeMessage.title}</h3>
                 <button type="button" className="btn btn-ghost" onClick={() => setActiveMessage(null)}>
@@ -2207,6 +2377,9 @@ export default function App() {
                 </button>
               </div>
               <p className="muted tiny">消息时间：{formatTime(activeMessage.createdAt)}</p>
+              {activeMessage.kind === "activity" ? (
+                <p className="muted tiny">活动奖励：{activeMessage.rewardTimes || 0} 次 ｜ {activeMessage.isClaimed ? `已领取（${formatTime(activeMessage.claimedAt)}）` : "待领取"}</p>
+              ) : null}
               <article className="message-detail-body">
                 {String(activeMessage.content || "")
                   .split(/\n+/)
@@ -2215,6 +2388,13 @@ export default function App() {
                     <p key={`${activeMessage.key}-${line}`}>{line}</p>
                   ))}
               </article>
+              {activeMessage.kind === "activity" ? (
+                <div className="modal-actions">
+                  <button type="button" className="btn btn-primary" disabled={noticeRefreshing || activeMessage.isClaimed} onClick={() => void handleClaimReward(activeMessage)}>
+                    {activeMessage.isClaimed ? "已领取" : noticeRefreshing ? "领取中..." : "领取奖励"}
+                  </button>
+                </div>
+              ) : null}
             </section>
           </div>
         ) : null}

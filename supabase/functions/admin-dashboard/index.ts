@@ -63,7 +63,7 @@ Deno.serve(async (req) => {
 
     const { data: notices, error: noticesError } = await adminClient
       .from("notices")
-      .select("id,title,content,kind,target_user_id,active,created_at")
+      .select("id,title,content,kind,reward_times,target_user_id,active,created_at")
       .order("created_at", { ascending: false })
       .limit(50);
     if (noticesError) return json({ message: noticesError.message }, 500);

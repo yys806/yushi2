@@ -111,7 +111,8 @@ create table if not exists public.notices (
   id uuid primary key default gen_random_uuid(),
   title text not null,
   content text not null,
-  kind text not null default 'normal' check (kind in ('normal', 'announcement')),
+  kind text not null default 'normal' check (kind in ('normal', 'announcement', 'activity')),
+  reward_times integer not null default 0 check (reward_times >= 0 and reward_times <= 10000),
   target_user_id uuid references auth.users(id) on delete cascade,
   active boolean not null default true,
   created_by uuid references auth.users(id) on delete set null,
@@ -119,9 +120,12 @@ create table if not exists public.notices (
 );
 
 alter table public.notices add column if not exists kind text not null default 'normal';
+alter table public.notices add column if not exists reward_times integer not null default 0;
 alter table public.notices add column if not exists target_user_id uuid references auth.users(id) on delete cascade;
 alter table public.notices drop constraint if exists notices_kind_check;
-alter table public.notices add constraint notices_kind_check check (kind in ('normal', 'announcement'));
+alter table public.notices add constraint notices_kind_check check (kind in ('normal', 'announcement', 'activity'));
+alter table public.notices drop constraint if exists notices_reward_times_check;
+alter table public.notices add constraint notices_reward_times_check check (reward_times >= 0 and reward_times <= 10000);
 
 create index if not exists notices_active_created_idx on public.notices(active, created_at desc);
 create index if not exists notices_target_user_created_idx on public.notices(target_user_id, created_at desc);
@@ -135,7 +139,17 @@ create table if not exists public.message_reads (
   unique(user_id, message_type, message_id)
 );
 
+create table if not exists public.reward_claims (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  notice_id uuid not null references public.notices(id) on delete cascade,
+  reward_times integer not null check (reward_times > 0),
+  claimed_at timestamptz not null default now(),
+  unique(user_id, notice_id)
+);
+
 create index if not exists message_reads_user_read_idx on public.message_reads(user_id, read_at desc);
+create index if not exists reward_claims_user_claimed_idx on public.reward_claims(user_id, claimed_at desc);
 
 create table if not exists public.museum_items (
   id uuid primary key default gen_random_uuid(),
@@ -211,6 +225,7 @@ alter table public.orders enable row level security;
 alter table public.quota_applications enable row level security;
 alter table public.notices enable row level security;
 alter table public.message_reads enable row level security;
+alter table public.reward_claims enable row level security;
 alter table public.museum_items enable row level security;
 
 drop policy if exists "profiles_select_own" on public.user_profiles;
@@ -303,6 +318,14 @@ for insert to authenticated with check (auth.uid() = user_id);
 drop policy if exists "message_reads_update_own" on public.message_reads;
 create policy "message_reads_update_own" on public.message_reads
 for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "reward_claims_select_own" on public.reward_claims;
+create policy "reward_claims_select_own" on public.reward_claims
+for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "reward_claims_insert_own" on public.reward_claims;
+create policy "reward_claims_insert_own" on public.reward_claims
+for insert to authenticated with check (auth.uid() = user_id);
 
 drop policy if exists "museum_select_active" on public.museum_items;
 create policy "museum_select_active" on public.museum_items

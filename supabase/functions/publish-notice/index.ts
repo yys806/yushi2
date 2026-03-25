@@ -54,17 +54,21 @@ Deno.serve(async (req) => {
       title?: string;
       content?: string;
       kind?: string;
+      rewardTimes?: number;
       targetUserId?: string | null;
       active?: boolean;
     };
 
     const title = String(body.title || "").trim().slice(0, 80);
     const content = String(body.content || "").trim().slice(0, 500);
-    const kind = String(body.kind || "normal").trim() === "announcement" ? "announcement" : "normal";
+    const kindRaw = String(body.kind || "normal").trim();
+    const kind = kindRaw === "announcement" || kindRaw === "activity" ? kindRaw : "normal";
+    const rewardTimes = Math.max(0, Math.min(10000, Math.floor(Number(body.rewardTimes || 0))));
     const targetUserId = body.targetUserId ? String(body.targetUserId).trim() : null;
     const active = body.active !== false;
     if (title.length < 2) return json({ message: "标题至少 2 个字" }, 400);
     if (content.length < 2) return json({ message: "内容至少 2 个字" }, 400);
+    if (kind === "activity" && rewardTimes <= 0) return json({ message: "活动奖励额度必须大于 0" }, 400);
 
     if (targetUserId) {
       const { data: userExists, error: userErr } = await adminClient
@@ -82,11 +86,12 @@ Deno.serve(async (req) => {
         title,
         content,
         kind,
+        reward_times: rewardTimes,
         target_user_id: targetUserId,
         active,
         created_by: authData.user.id,
       })
-      .select("id,title,content,kind,target_user_id,active,created_at")
+      .select("id,title,content,kind,reward_times,target_user_id,active,created_at")
       .single();
     if (insertError || !row) return json({ message: insertError?.message || "发布失败" }, 500);
 

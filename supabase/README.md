@@ -66,8 +66,10 @@ This deploys:
 - `review-application`
 - `publish-notice`
 - `update-notice`
+- `claim-reward`
 - `publish-museum-item`
 - `update-museum-item`
+- `adjust-user-quota`
 - `admin-delete-user`
 - `admin-delete-notice`
 - `admin-delete-museum-item`

@@ -50,46 +50,34 @@ Deno.serve(async (req) => {
       .single();
     if (profileError || !profile?.is_admin) return json({ message: "Forbidden" }, 403);
 
-    const body = (await req.json()) as {
-      noticeId?: string;
-      title?: string;
-      content?: string;
-      kind?: string;
-      rewardTimes?: number;
-      targetUserId?: string | null;
-    };
-    const noticeId = String(body.noticeId || "").trim();
-    const title = String(body.title || "").trim().slice(0, 80);
-    const content = String(body.content || "").trim().slice(0, 500);
-    const kindRaw = String(body.kind || "normal").trim();
-    const kind = kindRaw === "announcement" || kindRaw === "activity" ? kindRaw : "normal";
-    const rewardTimes = Math.max(0, Math.min(10000, Math.floor(Number(body.rewardTimes || 0))));
-    const targetUserId = body.targetUserId ? String(body.targetUserId).trim() : null;
-    if (!noticeId) return json({ message: "noticeId required" }, 400);
-    if (title.length < 2) return json({ message: "标题至少 2 个字" }, 400);
-    if (content.length < 2) return json({ message: "内容至少 2 个字" }, 400);
-    if (kind === "activity" && rewardTimes <= 0) return json({ message: "活动奖励额度必须大于 0" }, 400);
+    const body = (await req.json()) as { targetUserId?: string; quotaTotal?: number };
+    const targetUserId = String(body.targetUserId || "").trim();
+    const quotaTotal = Math.max(0, Math.floor(Number(body.quotaTotal ?? -1)));
 
-    if (targetUserId) {
-      const { data: userExists, error: userErr } = await adminClient
-        .from("user_profiles")
-        .select("id")
-        .eq("id", targetUserId)
-        .maybeSingle();
-      if (userErr) return json({ message: userErr.message }, 500);
-      if (!userExists) return json({ message: "目标用户不存在" }, 400);
-    }
+    if (!targetUserId) return json({ message: "targetUserId required" }, 400);
+    if (!Number.isFinite(quotaTotal)) return json({ message: "quotaTotal invalid" }, 400);
 
-    const { data: row, error: updateError } = await adminClient
-      .from("notices")
-      .update({ title, content, kind, reward_times: rewardTimes, target_user_id: targetUserId })
-      .eq("id", noticeId)
-      .select("id,title,content,kind,reward_times,target_user_id,active,created_at")
+    const { data: target, error: targetErr } = await adminClient
+      .from("user_profiles")
+      .select("id,quota_used")
+      .eq("id", targetUserId)
+      .maybeSingle();
+    if (targetErr) return json({ message: targetErr.message }, 500);
+    if (!target) return json({ message: "用户不存在" }, 404);
+
+    const quotaUsed = Math.max(0, Math.floor(Number(target.quota_used || 0)));
+    const nextUsed = Math.min(quotaUsed, quotaTotal);
+
+    const { data: updated, error: updateErr } = await adminClient
+      .from("user_profiles")
+      .update({ quota_total: quotaTotal, quota_used: nextUsed })
+      .eq("id", targetUserId)
+      .select("id,email,nickname,quota_total,quota_used")
       .single();
 
-    if (updateError || !row) return json({ message: updateError?.message || "更新失败" }, 500);
+    if (updateErr || !updated) return json({ message: updateErr?.message || "调整额度失败" }, 500);
 
-    return json({ notice: row, message: "公告已更新" });
+    return json({ message: "额度已调整", user: updated });
   } catch (e) {
     return json({ message: e instanceof Error ? e.message : "Unexpected error" }, 500);
   }
