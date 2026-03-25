@@ -50,18 +50,20 @@ Deno.serve(async (req) => {
       .single();
     if (profileError || !profile?.is_admin) return json({ message: "Forbidden" }, 403);
 
-    const body = (await req.json()) as { itemId?: string; category?: string; title?: string; description?: string };
+    const body = (await req.json()) as { itemId?: string; category?: string; title?: string; description?: string; imageUrl?: string };
     const itemId = String(body.itemId || "").trim();
     const category = String(body.category || "natural").trim() === "carving" ? "carving" : "natural";
+    const imageUrl = String(body.imageUrl || "").trim();
     const title = String(body.title || "").trim().slice(0, 80);
     const description = String(body.description || "").trim().slice(0, 2000);
     if (!itemId) return json({ message: "itemId required" }, 400);
+    if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) return json({ message: "图片链接必须是 http/https" }, 400);
     if (title.length < 2) return json({ message: "标题至少 2 个字" }, 400);
     if (description.length < 2) return json({ message: "说明至少 2 个字" }, 400);
 
     const { data: row, error: updateError } = await adminClient
       .from("museum_items")
-      .update({ category, title, description, updated_at: new Date().toISOString() })
+      .update({ category, image_url: imageUrl, title, description, updated_at: new Date().toISOString() })
       .eq("id", itemId)
       .select("id,category,title,description,image_url,active,created_at,updated_at")
       .single();
