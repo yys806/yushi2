@@ -80,6 +80,35 @@ const recommendedCombos = [
   },
 ];
 
+const TEXT_INPUT_PRICE_PER_K = 0.002;
+const TEXT_OUTPUT_PRICE_PER_K = 0.003;
+const IMAGE_PRICE_PER_IMAGE = 0.3;
+
+type UsageInfo = {
+  inputTokens: number;
+  outputTokens: number;
+};
+
+function extractUsage(raw: unknown): UsageInfo {
+  const usage = (raw || {}) as Record<string, unknown>;
+  const inputTokens = Number(
+    usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens ?? usage.inputTokens ?? 0
+  );
+  const outputTokens = Number(
+    usage.completion_tokens ?? usage.output_tokens ?? usage.completionTokens ?? usage.outputTokens ?? 0
+  );
+  return {
+    inputTokens: Number.isFinite(inputTokens) && inputTokens > 0 ? Math.floor(inputTokens) : 0,
+    outputTokens: Number.isFinite(outputTokens) && outputTokens > 0 ? Math.floor(outputTokens) : 0,
+  };
+}
+
+function calcTextCostCny(inputTokens: number, outputTokens: number) {
+  const inputCost = (inputTokens / 1000) * TEXT_INPUT_PRICE_PER_K;
+  const outputCost = (outputTokens / 1000) * TEXT_OUTPUT_PRICE_PER_K;
+  return Number((inputCost + outputCost).toFixed(6));
+}
+
 function json(data: Json, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -227,7 +256,7 @@ async function callSiliconPromptComposer(
   input: { material: string; pattern: string; productType: string; styleHint: string; budget: number; subject: string; recipient: string; customInput: string }
 ) {
   if (!apiKey) {
-    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt };
+    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt, usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   const promptTask = [
@@ -270,16 +299,17 @@ async function callSiliconPromptComposer(
   });
 
   if (!resp.ok) {
-    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt };
+    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt, usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   const data = await resp.json();
   const content = String(data?.choices?.[0]?.message?.content ?? "{}");
   const parsed = parsePromptJson(content);
+  const usage = extractUsage(data?.usage);
 
   const prompt = String(parsed?.prompt || "").trim() || bundle.imagePrompt;
   const negative = String(parsed?.negative || "").trim() || bundle.negativePrompt;
-  return { prompt, negative };
+  return { prompt, negative, usage };
 }
 
 async function callSiliconText(apiKey: string, model: string, promptBrief: string, subject: string, warning: string | null) {
@@ -295,6 +325,7 @@ async function callSiliconText(apiKey: string, model: string, promptBrief: strin
     return {
       inspiration: warning ? `${fallbackInspiration}（${warning}）` : fallbackInspiration,
       meaning: fallbackMeaning,
+      usage: { inputTokens: 0, outputTokens: 0 },
     };
   }
 
@@ -325,16 +356,19 @@ async function callSiliconText(apiKey: string, model: string, promptBrief: strin
     return {
       inspiration: warning ? `${fallbackInspiration}（${warning}）` : fallbackInspiration,
       meaning: fallbackMeaning,
+      usage: { inputTokens: 0, outputTokens: 0 },
     };
   }
 
   const data = await resp.json();
   const content = String(data?.choices?.[0]?.message?.content ?? "{}");
   const parsed = parseTextJson(content);
+  const usage = extractUsage(data?.usage);
   if (!parsed) {
     return {
       inspiration: warning ? `${fallbackInspiration}（${warning}）` : fallbackInspiration,
       meaning: fallbackMeaning,
+      usage,
     };
   }
 
@@ -343,11 +377,12 @@ async function callSiliconText(apiKey: string, model: string, promptBrief: strin
   return {
     inspiration: warning ? `${inspiration}（${warning}）` : inspiration,
     meaning,
+    usage,
   };
 }
 
 async function callSiliconImage(apiKey: string, model: string, prompt: string, negativePrompt: string) {
-  if (!apiKey) return "https://picsum.photos/768/1024";
+  if (!apiKey) return { imageUrl: "https://picsum.photos/768/1024", imageCount: 0 };
 
   const finalPrompt = [prompt, `Negative constraints: ${negativePrompt}`].filter(Boolean).join(". ");
 
@@ -364,9 +399,12 @@ async function callSiliconImage(apiKey: string, model: string, prompt: string, n
     }),
   });
 
-  if (!resp.ok) return "https://picsum.photos/768/1024";
+  if (!resp.ok) return { imageUrl: "https://picsum.photos/768/1024", imageCount: 0 };
   const data = await resp.json();
-  return String(data?.data?.[0]?.url ?? "https://picsum.photos/768/1024");
+  return {
+    imageUrl: String(data?.data?.[0]?.url ?? "https://picsum.photos/768/1024"),
+    imageCount: 1,
+  };
 }
 
 Deno.serve(async (req) => {
@@ -454,7 +492,7 @@ Deno.serve(async (req) => {
       bundle,
       { material, pattern, productType, styleHint, budget, subject, recipient, customInput }
     );
-    const imageUrl = await callSiliconImage(siliconflowKey, imageModel, composed.prompt, composed.negative);
+    const imageResult = await callSiliconImage(siliconflowKey, imageModel, composed.prompt, composed.negative);
 
     const title = `${pattern}${productType} · ${styleHint || material}`;
 
@@ -472,7 +510,7 @@ Deno.serve(async (req) => {
         meaning: text.meaning,
         grade: "评级中...",
         grade_reason: "正在由AI进行评分",
-        image_url: imageUrl,
+        image_url: imageResult.imageUrl,
       })
       .select("*")
       .single();
@@ -485,6 +523,54 @@ Deno.serve(async (req) => {
         .update({ quota_used: profile.quota_used + 1, updated_at: new Date().toISOString() })
         .eq("id", auth.user.id);
       if (updateError) return json({ message: updateError.message }, 500);
+    }
+
+    const textInputTokens = (text.usage?.inputTokens || 0) + (composed.usage?.inputTokens || 0);
+    const textOutputTokens = (text.usage?.outputTokens || 0) + (composed.usage?.outputTokens || 0);
+    const imageCount = Number(imageResult.imageCount || 0);
+    const textCost = calcTextCostCny(textInputTokens, textOutputTokens);
+    const imageCost = Number((imageCount * IMAGE_PRICE_PER_IMAGE).toFixed(6));
+
+    const usageRows = [
+      {
+        user_id: auth.user.id,
+        work_id: inserted.id,
+        stage: "generate_text",
+        provider: "siliconflow",
+        model: textModel,
+        input_tokens: textInputTokens,
+        output_tokens: textOutputTokens,
+        image_count: 0,
+        text_cost_cny: textCost,
+        image_cost_cny: 0,
+        total_cost_cny: textCost,
+        metadata: {
+          material,
+          pattern,
+          productType,
+        },
+      },
+      {
+        user_id: auth.user.id,
+        work_id: inserted.id,
+        stage: "generate_image",
+        provider: "siliconflow",
+        model: imageModel,
+        input_tokens: 0,
+        output_tokens: 0,
+        image_count: imageCount,
+        text_cost_cny: 0,
+        image_cost_cny: imageCost,
+        total_cost_cny: imageCost,
+        metadata: {
+          promptModel,
+        },
+      },
+    ];
+
+    const { error: usageError } = await adminClient.from("ai_usage_logs").insert(usageRows);
+    if (usageError && usageError.code !== "42P01") {
+      console.error("insert ai_usage_logs failed", usageError.message);
     }
 
     return json({

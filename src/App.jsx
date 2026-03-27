@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
+import appLogoSrc from "../images/logo.png";
 
 const jadeImages = [
   new URL("../images/generated-1774269443226.png", import.meta.url).href,
@@ -11,11 +12,23 @@ const jadeImages = [
   new URL("../images/generated-1774269623134.png", import.meta.url).href,
 ];
 
+const appLogo = appLogoSrc;
+const MAIN_PAGES = ["home", "custom", "product", "museum", "profile"];
+
 const options = {
   material: ["翡翠", "和田玉", "岫玉", "独山玉", "绿松石", "寿山石", "欧珀"],
   pattern: ["龙纹", "饕餮纹", "云纹", "鸟纹", "鱼纹", "绳纹", "蝉纹", "云雷纹", "蟠螭纹", "缠枝纹"],
   form: ["吊坠", "手镯", "戒指", "摆件", "印章"],
 };
+
+const TEMPLATE_PRESETS = [
+  { id: "mom-blessing", name: "送妈妈", material: "和田玉", pattern: "云纹", form: "吊坠", budget: 2800, recipient: "妈妈", customInput: "温润典雅，适合日常佩戴" },
+  { id: "lover-commitment", name: "送恋人", material: "翡翠", pattern: "缠枝纹", form: "戒指", budget: 4200, recipient: "女朋友", customInput: "线条精致，寓意长久陪伴" },
+  { id: "mentor-respect", name: "送导师", material: "岫玉", pattern: "云雷纹", form: "摆件", budget: 3600, recipient: "导师", customInput: "简洁稳重，突出文化气质" },
+  { id: "business-gift", name: "商务礼赠", material: "独山玉", pattern: "蟠螭纹", form: "印章", budget: 5200, recipient: "合作伙伴", customInput: "庄重有辨识度，便于陈列" },
+  { id: "father-safe", name: "送爸爸", material: "绿松石", pattern: "鱼纹", form: "手镯", budget: 3200, recipient: "爸爸", customInput: "大气沉稳，寓意平安顺遂" },
+  { id: "self-luck", name: "给自己", material: "翡翠", pattern: "龙纹", form: "吊坠", budget: 2600, recipient: "自己", customInput: "年轻感与好运寓意并重" },
+];
 
 const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const ADMIN_TOKEN_STORAGE_KEY = "shenyu_admin_token";
@@ -91,6 +104,42 @@ function isRetryableAuthMessage(message) {
 function isAuthFailure(message) {
   const msg = String(message || "").toLowerCase();
   return msg.includes("401") || msg.includes("403") || msg.includes("unauthorized") || msg.includes("forbidden") || msg.includes("登录");
+}
+
+function normalizeErrorMessage(raw) {
+  const msg = String(raw || "").trim();
+  if (!msg) return "操作失败，请稍后重试";
+  if (msg.includes("已注册")) return "该用户已注册";
+  if (msg.includes("用户不存在")) return "用户不存在";
+  if (msg.includes("密码错误")) return "密码错误";
+  if (msg.includes("该用户已注册")) return "该用户已注册";
+  if (msg.includes("密码不一致")) return "密码不一致";
+  if (msg.includes("注意密码要求")) return "注意密码要求";
+  if (msg.includes("额度已用尽")) return "额度已用尽";
+  if (/[\u4e00-\u9fa5]/.test(msg)) return msg;
+
+  const lower = msg.toLowerCase();
+  if (lower.includes("edge function returned a non-2xx")) return "服务繁忙";
+  if (lower.includes("invalid login credentials")) return "密码错误";
+  if (lower.includes("user not found") || lower.includes("not found")) return "用户不存在";
+  if (lower.includes("already") || lower.includes("exists") || lower.includes("already registered")) return "该用户已注册";
+  if (lower.includes("quota exceeded")) return "额度已用尽";
+  if (lower.includes("duplicate") && lower.includes("nickname")) return "昵称已被占用，请换一个";
+  if (lower.includes("duplicate") && lower.includes("user_profiles_nickname_unique_idx")) return "昵称已被占用，请换一个";
+  if (lower.includes("duplicate key value")) return "数据已存在，请更换后重试";
+  if (lower.includes("failed to fetch") || lower.includes("network")) return "网络连接异常，请稍后重试";
+  if (lower.includes("password") && lower.includes("must")) return "注意密码要求";
+  if (lower.includes("password") && lower.includes("match")) return "密码不一致";
+  if (lower.includes("timeout") || lower.includes("超时")) return "请求超时";
+  if (lower.includes("unauthorized") || lower.includes("forbidden")) return "权限不足，请重新登录";
+  return "操作失败";
+}
+
+function limitIslandErrorMessage(message, maxLen = 6) {
+  const text = String(message || "").trim();
+  if (!text) return "操作失败";
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen);
 }
 
 function isMissingRelationError(err) {
@@ -185,7 +234,7 @@ function mapWork(item) {
   };
 }
 
-function ProductCard({ work }) {
+function ProductCard({ work, onPreview }) {
   if (!work) return null;
 
   return (
@@ -195,9 +244,9 @@ function ProductCard({ work }) {
           <span className="chip">{work.name?.split(" · ")[0] || "作品名称"}</span>
           <span className="chip">{work.grade || "A 级"}</span>
         </div>
-        <div className="image-stage">
-          <img src={work.image} alt={work.name} />
-        </div>
+        <button type="button" className="image-stage image-stage-btn" onClick={() => onPreview?.(work.image)}>
+          <img src={work.image} alt={work.name} className="previewable-image" />
+        </button>
       </div>
       <section className="product-block">
         <h4>设计灵感</h4>
@@ -211,11 +260,25 @@ function ProductCard({ work }) {
   );
 }
 
-function AuthPage({ loading, error, mode, form, onChange, onMode, onSubmit }) {
+function AppBrand({ title, center = false }) {
+  const [logoLoadFailed, setLogoLoadFailed] = useState(false);
+  return (
+    <div className={`brand-title ${center ? "brand-title-center" : ""}`}>
+      {logoLoadFailed ? (
+        <span className="app-logo-fallback">珅</span>
+      ) : (
+        <img src={appLogo} alt="珅玉定制Logo" className="app-logo" onError={() => setLogoLoadFailed(true)} />
+      )}
+      <h1 className="title-lg">{title}</h1>
+    </div>
+  );
+}
+
+function AuthPage({ loading, mode, form, onChange, onMode, onSubmit }) {
   return (
     <>
-      <header className="top-bar">
-        <h1 className="title-lg">珅玉定制</h1>
+      <header className="top-bar top-bar-center">
+        <AppBrand title="珅玉定制" center />
       </header>
       <p className="muted">使用前请先注册或登录</p>
 
@@ -265,11 +328,6 @@ function AuthPage({ loading, error, mode, form, onChange, onMode, onSubmit }) {
       <button type="button" className="btn btn-ghost" onClick={onMode}>
         {mode === "register" ? "已有账号？去登录" : "没有账号？去注册"}
       </button>
-      {error ? (
-        <p className="muted" style={{ color: "#dc2626" }}>
-          {error}
-        </p>
-      ) : null}
     </>
   );
 }
@@ -331,6 +389,8 @@ export default function App() {
   const [rewardClaims, setRewardClaims] = useState([]);
   const [museumItems, setMuseumItems] = useState([]);
   const [selectedMuseumId, setSelectedMuseumId] = useState("");
+  const [museumQuery, setMuseumQuery] = useState("");
+  const [homeCarouselImages, setHomeCarouselImages] = useState([]);
 
   const [loadingAuth, setLoadingAuth] = useState(false);
   const [loadingGenerate, setLoadingGenerate] = useState(false);
@@ -339,7 +399,7 @@ export default function App() {
   const [loadingData, setLoadingData] = useState(false);
   const [loadingAdmin, setLoadingAdmin] = useState(false);
   const [error, setError] = useState("");
-  const [island, setIsland] = useState({ visible: false, message: "" });
+  const [island, setIsland] = useState({ visible: false, message: "", type: "success" });
   const [applyTimes, setApplyTimes] = useState(100);
   const [applyCustomTimes, setApplyCustomTimes] = useState("");
   const [applyMessage, setApplyMessage] = useState("");
@@ -349,6 +409,8 @@ export default function App() {
   const [reviewNote, setReviewNote] = useState("");
   const [noticeDraft, setNoticeDraft] = useState({ title: "", content: "", kind: "normal", targetUserId: "" });
   const [activityDraft, setActivityDraft] = useState({ title: "", content: "", rewardTimes: 10, targetUserId: "" });
+  const [carouselDraft, setCarouselDraft] = useState([]);
+  const [carouselUrlDraft, setCarouselUrlDraft] = useState("");
   const [quotaAdjustMap, setQuotaAdjustMap] = useState({});
   const [gradeDraft, setGradeDraft] = useState({ sWeight: 1, aWeight: 10, bWeight: 30, cWeight: 50 });
   const [adminForm, setAdminForm] = useState({ email: "", password: "" });
@@ -367,6 +429,10 @@ export default function App() {
   const [museumForm, setMuseumForm] = useState({ category: "natural", title: "", description: "", imageUrl: "" });
   const authForceTimerRef = useRef(null);
   const authCooldownUntilRef = useRef(0);
+  const pageRef = useRef("home");
+  const stackRef = useRef([]);
+  const popHandlingRef = useRef(false);
+  const lastExitHintRef = useRef(0);
   const worksRefreshInFlightRef = useRef(new Map());
   const noticesRefreshInFlightRef = useRef(new Map());
   const refreshWorksAndFavoritesRef = useRef(async () => null);
@@ -386,24 +452,45 @@ export default function App() {
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
   const [selectedFavoriteId, setSelectedFavoriteId] = useState("");
   const carouselRef = useRef(null);
+  const screenRef = useRef(null);
   const islandTimerRef = useRef(null);
+  const museumScrollTopRef = useRef(0);
+  const shouldRestoreMuseumScrollRef = useRef(false);
   const [profileEdit, setProfileEdit] = useState({
     nickname: "",
     oldPassword: "",
     newPassword: "",
     confirmNewPassword: "",
   });
+  const [previewImageUrl, setPreviewImageUrl] = useState("");
 
-  const showIsland = useCallback((message) => {
+  const showIsland = useCallback((message, type = "success") => {
+    if (!message) return;
     if (islandTimerRef.current) {
       window.clearTimeout(islandTimerRef.current);
     }
-    setIsland({ visible: true, message });
+    setIsland({ visible: true, message, type });
     islandTimerRef.current = window.setTimeout(() => {
-      setIsland({ visible: false, message: "" });
+      setIsland({ visible: false, message: "", type: "success" });
       islandTimerRef.current = null;
     }, 1800);
   }, []);
+
+  const showErrorIsland = useCallback((message) => {
+    showIsland(limitIslandErrorMessage(normalizeErrorMessage(message)), "error");
+  }, [showIsland]);
+
+  useEffect(() => {
+    if (!error) return;
+    showErrorIsland(error);
+    setError("");
+  }, [error, showErrorIsland]);
+
+  useEffect(() => {
+    if (!adminError) return;
+    showErrorIsland(adminError);
+    setAdminError("");
+  }, [adminError, showErrorIsland]);
 
   const worksFavoritesCacheKey = useCallback((uid) => `yushi2:wf:${uid}`, []);
   const noticesCacheKey = useCallback((uid) => `yushi2:na:${uid}`, []);
@@ -422,12 +509,23 @@ export default function App() {
     });
   }, []);
 
-  const navTo = (next) => {
-    setStack((s) => [...s, page]);
+  const navTo = useCallback((next) => {
+    const current = pageRef.current;
+    setStack((s) => [...s, current]);
     setPage(next);
+  }, []);
+
+  const openMuseumDetail = (id) => {
+    museumScrollTopRef.current = screenRef.current?.scrollTop || 0;
+    shouldRestoreMuseumScrollRef.current = true;
+    setSelectedMuseumId(id);
+    navTo("museum-detail");
   };
 
   const navBack = () => {
+    if (page === "museum-detail") {
+      shouldRestoreMuseumScrollRef.current = true;
+    }
     setStack((s) => {
       const cp = [...s];
       const prev = cp.pop();
@@ -435,6 +533,77 @@ export default function App() {
       return cp;
     });
   };
+
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+
+  useEffect(() => {
+    stackRef.current = stack;
+  }, [stack]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+
+    const onPopState = () => {
+      const currentPage = pageRef.current;
+      const currentStack = stackRef.current;
+      const isMain = MAIN_PAGES.includes(currentPage);
+
+      if (!isMain && currentStack.length > 0) {
+        popHandlingRef.current = true;
+        setStack((prevStack) => {
+          const copy = [...prevStack];
+          const prevPage = copy.pop() || "home";
+          setPage(prevPage);
+          return copy;
+        });
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastExitHintRef.current < 1500) {
+        return;
+      }
+
+      lastExitHintRef.current = now;
+      showErrorIsland("再按退出");
+      popHandlingRef.current = true;
+      window.history.pushState({ app: true, page: currentPage }, "", window.location.href);
+    };
+
+    window.history.replaceState({ app: true, page: pageRef.current }, "", window.location.href);
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [showErrorIsland]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (popHandlingRef.current) {
+      popHandlingRef.current = false;
+      return;
+    }
+    window.history.pushState({ app: true, page }, "", window.location.href);
+  }, [page]);
+
+  useEffect(() => {
+    if (page !== "museum") return;
+    if (!shouldRestoreMuseumScrollRef.current) return;
+    const targetTop = museumScrollTopRef.current;
+    const id = window.requestAnimationFrame(() => {
+      if (screenRef.current) {
+        screenRef.current.scrollTop = targetTop;
+      }
+      shouldRestoreMuseumScrollRef.current = false;
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [page]);
+
+  useEffect(() => {
+    if (page !== "product") return;
+    if (!screenRef.current) return;
+    screenRef.current.scrollTop = 0;
+  }, [page]);
 
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
@@ -654,6 +823,22 @@ export default function App() {
       : "登录失败";
     throw lastError || new Error(fallbackMessage);
   }, [recoverSessionAfterTimeout]);
+
+  const checkUserExistsByEmail = useCallback(async (email) => {
+    const targetEmail = String(email || "").trim().toLowerCase();
+    if (!targetEmail) return false;
+    try {
+      const { data, error: invokeErr } = await withTimeout(
+        supabase.functions.invoke("check-user-exists", { body: { email: targetEmail } }),
+        8000,
+        "用户校验"
+      );
+      if (invokeErr) return false;
+      return Boolean(data?.exists);
+    } catch {
+      return false;
+    }
+  }, []);
 
   const rateWorkWithRetry = useCallback(async (workId, retry = 3) => {
     if (!workId) return null;
@@ -985,10 +1170,10 @@ export default function App() {
     try {
       if (authMode === "register") {
         if (!PASSWORD_RULE.test(authForm.password)) {
-          throw new Error("密码至少 8 位，且必须包含大小写字母、数字和符号");
+          throw new Error("注意密码要求");
         }
         if (authForm.password !== authForm.confirmPassword) {
-          throw new Error("两次输入的密码不一致");
+          throw new Error("密码不一致");
         }
 
         const email = authForm.email.trim();
@@ -1015,7 +1200,14 @@ export default function App() {
       setPage("home");
       setStack([]);
     } catch (e) {
-      const message = e?.message || "登录/注册失败";
+      let message = e?.message || "登录/注册失败";
+      if (authMode === "login") {
+        const normalized = String(message || "").toLowerCase();
+        if (normalized.includes("invalid login credentials")) {
+          const exists = await checkUserExistsByEmail(authForm.email.trim());
+          message = exists ? "密码错误" : "用户不存在";
+        }
+      }
       if (isRetryableAuthMessage(message)) {
         authCooldownUntilRef.current = Date.now() + 90 * 1000;
       }
@@ -1031,6 +1223,10 @@ export default function App() {
 
   const handleGenerate = async () => {
     if (!session?.access_token || loadingGenerate) return;
+    if (profile && !profile.isAdmin && Number(profile.quotaRemaining) <= 0) {
+      setError("额度已用尽");
+      return;
+    }
     const recipient = custom.recipient.trim();
     if (recipient.length < 2) {
       setError("请填写送给的对象（至少 2 个字）");
@@ -1056,21 +1252,24 @@ export default function App() {
         },
       });
 
-      await animateProgressBar("plan", 100, 1, 95);
-      showIsland("设计思路已完成");
+      await animateProgressBar("plan", 100, 1, 90);
+      showIsland("方案已完成");
 
       setGeneratePhase("image");
-      const stageTwoCapPromise = animateProgressBar("image", 86, 1, 120);
+      const imageCapPromise = animateProgressBar("image", 92, 1, 165);
       const { data, error: invokeError } = await invokePromise;
-      await stageTwoCapPromise;
+      await imageCapPromise;
       if (invokeError) throw invokeError;
 
-      await animateProgressBar("image", 100, 2, 70);
+      const extraImageDelayMs = 20000 + Math.floor(Math.random() * 5001);
+      await sleep(extraImageDelayMs);
+
+      await animateProgressBar("image", 100, 2, 90);
       showIsland("设计图已完成");
 
       const mapped = mapWork(data?.work ?? data);
       setGeneratePhase("rating");
-      const ratingCapPromise = animateProgressBar("rating", 90, 1, 110);
+      const ratingCapPromise = animateProgressBar("rating", 90, 1, 173);
       const rated = await rateWorkWithRetry(mapped.id, 3);
       await ratingCapPromise;
 
@@ -1087,7 +1286,7 @@ export default function App() {
           .eq("user_id", user?.id || "");
       }
 
-      await animateProgressBar("rating", 100, 2, 65);
+      await animateProgressBar("rating", 100, 2, 105);
       showIsland("AI评级已完成");
 
       setCurrentWork(mapped);
@@ -1114,6 +1313,40 @@ export default function App() {
       }, 320);
     }
   };
+
+  const applyTemplate = useCallback((tpl, jumpToCustom = false) => {
+    if (!tpl) return;
+    setCustom({
+      material: tpl.material,
+      pattern: tpl.pattern,
+      form: tpl.form,
+      budget: tpl.budget,
+      recipient: tpl.recipient,
+      customInput: tpl.customInput,
+    });
+    showIsland("模板已应用");
+    if (jumpToCustom && page !== "custom") {
+      navTo("custom");
+    }
+  }, [navTo, page, showIsland]);
+
+  const guessTemplates = useMemo(() => {
+    const materialHit = new Set(
+      history
+        .map((item) => {
+          const summary = String(item.summary || "");
+          const match = summary.match(/材质：([^，,]+)/);
+          return match ? match[1].trim() : "";
+        })
+        .filter(Boolean)
+    );
+    const ranked = [...TEMPLATE_PRESETS].sort((a, b) => {
+      const aScore = materialHit.has(a.material) ? 1 : 0;
+      const bScore = materialHit.has(b.material) ? 1 : 0;
+      return bScore - aScore;
+    });
+    return ranked.slice(0, 3);
+  }, [history]);
 
   const handleFavorite = async () => {
     if (!currentWork || !user) return;
@@ -1323,11 +1556,11 @@ export default function App() {
       return;
     }
     if (!PASSWORD_RULE.test(profileEdit.newPassword)) {
-      setError("新密码至少 8 位，且必须包含大小写字母、数字和符号");
+      setError("注意密码要求");
       return;
     }
     if (profileEdit.newPassword !== profileEdit.confirmNewPassword) {
-      setError("两次新密码不一致");
+      setError("密码不一致");
       return;
     }
 
@@ -1538,16 +1771,33 @@ export default function App() {
     }
   }, [noticesCacheKey, showIsland, user]);
 
+  const refreshHomeCarousel = useCallback(async () => {
+    try {
+      const { data, error: invokeErr } = await supabase.functions.invoke("get-home-carousel", { body: {} });
+      if (invokeErr) throw invokeErr;
+      const list = Array.isArray(data?.images)
+        ? data.images.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)).slice(0, 6)
+        : [];
+      setHomeCarouselImages(list);
+    } catch {
+      setHomeCarouselImages([]);
+    }
+  }, []);
+
   const refreshMuseum = useCallback(async () => {
     setMuseumRefreshing(true);
     setError("");
     try {
-      const { data, error: museumErr } = await supabase
-        .from("museum_items")
-        .select("id,category,title,description,image_url,created_at")
-        .eq("active", true)
-        .order("created_at", { ascending: false })
-        .limit(100);
+      const [museumRes] = await Promise.all([
+        supabase
+          .from("museum_items")
+          .select("id,category,title,description,image_url,created_at")
+          .eq("active", true)
+          .order("created_at", { ascending: false })
+          .limit(100),
+        refreshHomeCarousel(),
+      ]);
+      const { data, error: museumErr } = museumRes;
       if (museumErr && !isMissingRelationError(museumErr)) throw museumErr;
       setMuseumItems(museumErr ? [] : data || []);
       showIsland("玉苑已刷新");
@@ -1556,12 +1806,22 @@ export default function App() {
     } finally {
       setMuseumRefreshing(false);
     }
-  }, [showIsland]);
+  }, [refreshHomeCarousel, showIsland]);
+
+  useEffect(() => {
+    if (!user) return;
+    void refreshHomeCarousel();
+  }, [user, refreshHomeCarousel]);
 
   useEffect(() => {
     if (!isAdminRoute || !adminToken) return;
     void loadAdminDashboard();
   }, [isAdminRoute, adminToken, loadAdminDashboard]);
+
+  useEffect(() => {
+    if (!isAdminRoute || !adminToken) return;
+    setCarouselDraft(homeCarouselImages.slice(0, 6));
+  }, [isAdminRoute, adminToken, homeCarouselImages]);
 
   const handleReviewApplication = async (applicationId, decision) => {
     setAdminError("");
@@ -1850,6 +2110,40 @@ export default function App() {
     }
   };
 
+  const handleAddCarouselUrl = () => {
+    const url = carouselUrlDraft.trim();
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) {
+      setAdminError("链接格式错误");
+      return;
+    }
+    if (carouselDraft.length >= 6) {
+      setAdminError("轮播图最多6张");
+      return;
+    }
+    setAdminError("");
+    setCarouselDraft((prev) => [...prev, url].slice(0, 6));
+    setCarouselUrlDraft("");
+  };
+
+  const handleSaveCarousel = async () => {
+    setAdminError("");
+    setAdminActionLoading(true);
+    try {
+      const urls = carouselDraft
+        .map((x) => String(x || "").trim())
+        .filter((x) => /^https?:\/\//i.test(x))
+        .slice(0, 6);
+      await adminInvoke("update-home-carousel", { images: urls });
+      setHomeCarouselImages(urls);
+      showIsland("轮播已更新");
+    } catch (e) {
+      setAdminError(e?.message || "保存失败");
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
   const handlePay = async () => {
     setError("");
     setApplyMessage("");
@@ -2072,7 +2366,6 @@ export default function App() {
           <section className="screen">
             <AuthPage
               loading={loadingAuth}
-              error={error}
               mode={authMode}
               form={authForm}
               onChange={(key, value) => setAuthForm((s) => ({ ...s, [key]: value }))}
@@ -2080,6 +2373,12 @@ export default function App() {
               onSubmit={handleAuth}
             />
           </section>
+          {island.visible ? (
+            <div className={`island-toast ${island.type === "error" ? "island-toast-error" : ""}`} role="status" aria-live="polite">
+              <span className={`island-check ${island.type === "error" ? "island-cross" : ""}`}>{island.type === "error" ? "✕" : "✓"}</span>
+              <span>{island.message}</span>
+            </div>
+          ) : null}
         </section>
       </main>
     );
@@ -2088,7 +2387,7 @@ export default function App() {
   const renderHome = () => (
     <>
       <header className="top-bar">
-        <h1 className="title-lg">珅玉定制</h1>
+        <AppBrand title="珅玉定制" />
       </header>
 
       <section className="hero-card">
@@ -2102,10 +2401,26 @@ export default function App() {
       <section>
         <h3 className="section-title">热门玉石</h3>
         <div ref={carouselRef} className="jade-carousel">
-          {jadeImages.slice(0, 6).map((src, i) => (
+          {homeCarouselImages.slice(0, 6).map((src, i) => (
             <div key={src} className="jade-item">
               <img src={src} alt={`玉石图 ${i + 1}`} loading="lazy" />
             </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card form-table">
+        <div className="row-between">
+          <h3 className="section-title">猜你想做</h3>
+          <span className="muted tiny">基于你最近偏好</span>
+        </div>
+        <div className="template-grid">
+          {guessTemplates.map((tpl) => (
+            <button key={tpl.id} type="button" className="template-card" onClick={() => applyTemplate(tpl, true)}>
+              <strong>{tpl.name}</strong>
+              <span className="muted tiny">{tpl.material} · {tpl.pattern}</span>
+              <span className="muted tiny">{tpl.form} · {formatBudget(tpl.budget)}</span>
+            </button>
           ))}
         </div>
       </section>
@@ -2123,7 +2438,7 @@ export default function App() {
   const renderCustom = () => (
     <>
       <header className="top-bar">
-        <h1 className="title-lg">珅玉定制</h1>
+        <AppBrand title="珅玉定制" />
       </header>
       <p className="muted">参数将进入大模型提示词，影响最终效果</p>
 
@@ -2158,6 +2473,22 @@ export default function App() {
             ))}
           </select>
         </label>
+      </section>
+
+      <section className="card form-table">
+        <div className="row-between">
+          <h3 className="section-title">模板中心</h3>
+          <span className="muted tiny">一键带入参数</span>
+        </div>
+        <div className="template-grid">
+          {TEMPLATE_PRESETS.map((tpl) => (
+            <button key={tpl.id} type="button" className="template-card" onClick={() => applyTemplate(tpl)}>
+              <strong>{tpl.name}</strong>
+              <span className="muted tiny">{tpl.material} · {tpl.pattern} · {tpl.form}</span>
+              <span className="muted tiny">对象：{tpl.recipient} ｜ 预算：{formatBudget(tpl.budget)}</span>
+            </button>
+          ))}
+        </div>
       </section>
 
       <section className="card">
@@ -2203,11 +2534,12 @@ export default function App() {
   const renderProduct = () => (
     <>
       <header className="top-bar">
-        <h1 className="title-lg">成品</h1>
+        <AppBrand title="成品" />
       </header>
       <p className="muted">生成结果与账号绑定，历史与收藏隔离</p>
       <section className="product-wrap">
         <ProductCard
+          onPreview={(url) => url && setPreviewImageUrl(url)}
           work={
             currentWork || {
               id: "pending",
@@ -2220,6 +2552,7 @@ export default function App() {
           }
         />
       </section>
+      <p className="muted tiny">点击图片可放大，手机长按可保存。</p>
       {currentWork?.gradeReason ? (
         <section className="card form-table">
           <h3 className="section-title">AI评级说明</h3>
@@ -2237,17 +2570,36 @@ export default function App() {
 
   const renderMuseum = () => (
     (() => {
-      const naturalItems = museumItems.filter((item) => item.category !== "carving");
-      const carvingItems = museumItems.filter((item) => item.category === "carving");
+      const keyword = museumQuery.trim().toLowerCase();
+      const filteredItems = museumItems.filter((item) => {
+        if (!keyword) return true;
+        const title = String(item.title || "").toLowerCase();
+        const description = String(item.description || "").toLowerCase();
+        return title.includes(keyword) || description.includes(keyword);
+      });
+      const naturalItems = filteredItems.filter((item) => item.category !== "carving");
+      const carvingItems = filteredItems.filter((item) => item.category === "carving");
       return (
     <>
       <header className="top-bar">
-        <h1 className="title-lg">玉苑</h1>
+        <AppBrand title="玉苑" />
         <button type="button" className="btn btn-ghost" disabled={museumRefreshing} onClick={() => void refreshMuseum()}>
           {museumRefreshing ? "刷新中..." : "刷新"}
         </button>
       </header>
       <p className="muted">玉石图鉴与文化说明，点击卡片查看详情。</p>
+
+      <section className="card form-table">
+        <label className="row-field">
+          搜索玉苑（名称或内容）
+          <input
+            value={museumQuery}
+            onChange={(e) => setMuseumQuery(e.target.value)}
+            placeholder="输入关键词，例如：龙纹、和田玉、福泽"
+          />
+        </label>
+        {keyword ? <p className="muted tiny">匹配结果：{filteredItems.length} 条</p> : null}
+      </section>
 
       <section className="card form-table">
         <h3 className="section-title">自然玉石</h3>
@@ -2257,10 +2609,7 @@ export default function App() {
             key={item.id}
             type="button"
             className="museum-card"
-            onClick={() => {
-              setSelectedMuseumId(item.id);
-              navTo("museum-detail");
-            }}
+            onClick={() => openMuseumDetail(item.id)}
           >
             <img src={item.image_url} alt={item.title} loading="lazy" />
             <div className="museum-card-body">
@@ -2280,10 +2629,7 @@ export default function App() {
             key={item.id}
             type="button"
             className="museum-card"
-            onClick={() => {
-              setSelectedMuseumId(item.id);
-              navTo("museum-detail");
-            }}
+            onClick={() => openMuseumDetail(item.id)}
           >
             <img src={item.image_url} alt={item.title} loading="lazy" />
             <div className="museum-card-body">
@@ -2295,7 +2641,7 @@ export default function App() {
         </div>
       </section>
 
-      {!museumItems.length ? <p className="muted">暂无馆藏内容，稍后刷新查看。</p> : null}
+      {!filteredItems.length ? <p className="muted">没有匹配内容，换个关键词试试。</p> : null}
     </>
       );
     })()
@@ -2304,7 +2650,7 @@ export default function App() {
   const renderProfile = () => (
     <>
       <header className="top-bar">
-        <h1 className="title-lg">我的</h1>
+        <AppBrand title="我的" />
         <div className="top-actions">
           <button type="button" className="gear-btn" onClick={() => navTo("settings")} aria-label="打开设置">
             ⚙
@@ -2552,7 +2898,6 @@ export default function App() {
             <button type="button" className="btn btn-primary" disabled={adminLoginLoading} onClick={handleAdminLogin}>
               {adminLoginLoading ? "登录中..." : "登录后台"}
             </button>
-            {adminError ? <p className="muted" style={{ color: "#dc2626" }}>{adminError}</p> : null}
           </section>
         </main>
       );
@@ -2582,7 +2927,6 @@ export default function App() {
           </header>
             {loadingAdmin ? <p className="muted">加载中...</p> : null}
             {adminActionLoading ? <p className="muted">处理中，请稍候...</p> : null}
-            {adminError ? <p className="muted" style={{ color: "#dc2626" }}>{adminError}</p> : null}
 
             {adminMenu === "approvals" ? (
               <section className="card form-table">
@@ -2755,6 +3099,42 @@ export default function App() {
 
             {adminMenu === "museum" ? (
               <section className="card form-table">
+                <h3 className="section-title">首页轮播图管理（最多6张）</h3>
+                <label className="row-field">
+                  添加图片链接
+                  <div className="admin-actions-inline">
+                    <input
+                      value={carouselUrlDraft}
+                      onChange={(e) => setCarouselUrlDraft(e.target.value)}
+                      placeholder="https://..."
+                    />
+                    <button type="button" className="btn btn-ghost" onClick={handleAddCarouselUrl} disabled={adminActionLoading}>
+                      添加
+                    </button>
+                  </div>
+                </label>
+                <div className="museum-grid">
+                  {carouselDraft.map((src) => (
+                    <article key={src} className="museum-card">
+                      <img src={src} alt="轮播图" loading="lazy" />
+                      <div className="museum-card-body">
+                        <p className="muted tiny">轮播图</p>
+                        <button
+                          type="button"
+                          className="record-delete"
+                          onClick={() => setCarouselDraft((prev) => prev.filter((item) => item !== src))}
+                          disabled={adminActionLoading}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+                <button type="button" className="btn btn-primary" disabled={adminActionLoading} onClick={handleSaveCarousel}>
+                  保存轮播图
+                </button>
+
                 <h3 className="section-title">发布玉苑内容</h3>
                 <p className="muted">发布必须包含图片、标题、说明三项。</p>
                 <label className="row-field">
@@ -2855,11 +3235,11 @@ export default function App() {
     <section className="generate-overlay" aria-live="polite">
       <div className="overlay-panel">
         <h3>正在生成成品</h3>
-        <p>{generatePhase === "plan" ? "正在生成设计思路..." : generatePhase === "image" ? "正在生成设计图..." : "正在进行AI评级..."}</p>
+        <p>{generatePhase === "plan" ? "正在整合需求与提示词..." : generatePhase === "image" ? "正在生成设计图..." : "正在进行AI评级..."}</p>
 
         <div className="progress-item">
           <div className="row-between">
-            <span>设计方案生成中</span>
+            <span>方案整合</span>
             <strong>{Math.round(generateProgress.plan)}%</strong>
           </div>
           <div className="progress-track">
@@ -2869,7 +3249,7 @@ export default function App() {
 
         <div className="progress-item">
           <div className="row-between">
-            <span>设计图生成中</span>
+            <span>设计图生成</span>
             <strong>{Math.round(generateProgress.image)}%</strong>
           </div>
           <div className="progress-track">
@@ -2879,7 +3259,7 @@ export default function App() {
 
         <div className="progress-item">
           <div className="row-between">
-            <span>AI评级中</span>
+            <span>AI评级</span>
             <strong>{Math.round(generateProgress.rating)}%</strong>
           </div>
           <div className="progress-track">
@@ -2899,8 +3279,8 @@ export default function App() {
       <>
         {renderAdmin()}
         {island.visible ? (
-          <div className="island-toast" role="status" aria-live="polite">
-            <span className="island-check">✓</span>
+          <div className={`island-toast ${island.type === "error" ? "island-toast-error" : ""}`} role="status" aria-live="polite">
+            <span className={`island-check ${island.type === "error" ? "island-cross" : ""}`}>{island.type === "error" ? "✕" : "✓"}</span>
             <span>{island.message}</span>
           </div>
         ) : null}
@@ -2939,7 +3319,7 @@ export default function App() {
             <h1>历史记录详情</h1>
           </header>
           <section className="product-wrap">
-            <ProductCard work={historyDetail} />
+            <ProductCard work={historyDetail} onPreview={(url) => url && setPreviewImageUrl(url)} />
           </section>
           {historyDetail ? (
             <section className="card form-table">
@@ -2976,7 +3356,7 @@ export default function App() {
             <h1>收藏详情</h1>
           </header>
           <section className="product-wrap">
-            <ProductCard work={favoriteDetail} />
+            <ProductCard work={favoriteDetail} onPreview={(url) => url && setPreviewImageUrl(url)} />
           </section>
           {favoriteDetail ? (
             <section className="card form-table">
@@ -3020,19 +3400,17 @@ export default function App() {
   return (
     <main className="app-shell">
       <section className="app">
-        <section className={`screen ${loadingGenerate && page === "product" ? "is-generating" : ""}`}>
-          {error ? (
-            <p className="muted" style={{ color: "#dc2626" }}>
-              {error}
-            </p>
-          ) : null}
+        <section
+          ref={screenRef}
+          className={`screen ${loadingGenerate && page === "product" ? "is-generating" : ""} ${loadingGenerate && page === "product" ? "screen-product-lock" : ""}`}
+        >
           {content}
           {loadingGenerate && page === "product" ? renderGeneratingOverlay() : null}
         </section>
         {["home", "custom", "product", "museum", "profile"].includes(page) && <Tabbar page={page} onNav={setPage} unreadCount={unreadCount} />}
         {island.visible ? (
-          <div className="island-toast" role="status" aria-live="polite">
-            <span className="island-check">✓</span>
+          <div className={`island-toast ${island.type === "error" ? "island-toast-error" : ""}`} role="status" aria-live="polite">
+            <span className={`island-check ${island.type === "error" ? "island-cross" : ""}`}>{island.type === "error" ? "✕" : "✓"}</span>
             <span>{island.message}</span>
           </div>
         ) : null}
@@ -3097,6 +3475,21 @@ export default function App() {
                   </button>
                 </div>
               ) : null}
+            </section>
+          </div>
+        ) : null}
+        {previewImageUrl ? (
+          <div className="modal-backdrop" role="dialog" aria-modal="true">
+            <section className="modal-card card form-table image-preview-modal">
+              <div className="row-between">
+                <h3 className="section-title">图片预览</h3>
+                <button type="button" className="btn btn-ghost" onClick={() => setPreviewImageUrl("")}>关闭</button>
+              </div>
+              <img src={previewImageUrl} alt="成品大图" className="image-preview-full" />
+              <p className="muted tiny">手机可长按图片保存，或点击下方按钮下载。</p>
+              <div className="modal-actions">
+                <a className="btn btn-primary" href={previewImageUrl} download="yushi-design.png" target="_blank" rel="noreferrer">下载图片</a>
+              </div>
             </section>
           </div>
         ) : null}

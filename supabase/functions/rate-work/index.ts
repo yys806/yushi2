@@ -2,6 +2,34 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 type Json = Record<string, unknown>;
 
+const TEXT_INPUT_PRICE_PER_K = 0.002;
+const TEXT_OUTPUT_PRICE_PER_K = 0.003;
+
+type UsageInfo = {
+  inputTokens: number;
+  outputTokens: number;
+};
+
+function extractUsage(raw: unknown): UsageInfo {
+  const usage = (raw || {}) as Record<string, unknown>;
+  const inputTokens = Number(
+    usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens ?? usage.inputTokens ?? 0
+  );
+  const outputTokens = Number(
+    usage.completion_tokens ?? usage.output_tokens ?? usage.completionTokens ?? usage.outputTokens ?? 0
+  );
+  return {
+    inputTokens: Number.isFinite(inputTokens) && inputTokens > 0 ? Math.floor(inputTokens) : 0,
+    outputTokens: Number.isFinite(outputTokens) && outputTokens > 0 ? Math.floor(outputTokens) : 0,
+  };
+}
+
+function calcTextCostCny(inputTokens: number, outputTokens: number) {
+  const inputCost = (inputTokens / 1000) * TEXT_INPUT_PRICE_PER_K;
+  const outputCost = (outputTokens / 1000) * TEXT_OUTPUT_PRICE_PER_K;
+  return Number((inputCost + outputCost).toFixed(6));
+}
+
 function json(data: Json, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -36,7 +64,7 @@ function pickGrade(weights: { s: number; a: number; b: number; c: number }) {
 
 async function callAiReason(apiKey: string, model: string, prompt: string) {
   if (!apiKey) {
-    return "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。";
+    return { reason: "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。", usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   const resp = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
@@ -66,11 +94,14 @@ async function callAiReason(apiKey: string, model: string, prompt: string) {
   });
 
   if (!resp.ok) {
-    return "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。";
+    return { reason: "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。", usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   const data = await resp.json();
-  return normalizeReason(data?.choices?.[0]?.message?.content);
+  return {
+    reason: normalizeReason(data?.choices?.[0]?.message?.content),
+    usage: extractUsage(data?.usage),
+  };
 }
 
 Deno.serve(async (req) => {
@@ -141,7 +172,8 @@ Deno.serve(async (req) => {
       `寓意：${work.meaning}`,
     ].join("\n");
 
-    const reason = await callAiReason(siliconflowKey, textModel, prompt);
+    const ratingResult = await callAiReason(siliconflowKey, textModel, prompt);
+    const reason = ratingResult.reason;
 
     const { error: updateError } = await adminClient
       .from("works")
@@ -153,6 +185,29 @@ Deno.serve(async (req) => {
       .eq("id", work.id)
       .eq("user_id", authData.user.id);
     if (updateError) return json({ message: updateError.message }, 500);
+
+    const inputTokens = ratingResult.usage?.inputTokens || 0;
+    const outputTokens = ratingResult.usage?.outputTokens || 0;
+    const textCost = calcTextCostCny(inputTokens, outputTokens);
+    const { error: usageError } = await adminClient.from("ai_usage_logs").insert({
+      user_id: authData.user.id,
+      work_id: work.id,
+      stage: "rating_text",
+      provider: "siliconflow",
+      model: textModel,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      image_count: 0,
+      text_cost_cny: textCost,
+      image_cost_cny: 0,
+      total_cost_cny: textCost,
+      metadata: {
+        grade,
+      },
+    });
+    if (usageError && usageError.code !== "42P01") {
+      console.error("insert ai_usage_logs failed", usageError.message);
+    }
 
     return json({ grade, reason });
   } catch (e) {

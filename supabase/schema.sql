@@ -21,6 +21,18 @@ insert into public.app_settings(key, value)
 values ('admin_email', '')
 on conflict (key) do nothing;
 
+insert into public.app_settings(key, value)
+values ('home_carousel_images', '[]')
+on conflict (key) do nothing;
+
+insert into public.app_settings(key, value)
+values ('provider_balance_base_cny', '0')
+on conflict (key) do nothing;
+
+insert into public.app_settings(key, value)
+values ('provider_balance_base_at', '1970-01-01T00:00:00.000Z')
+on conflict (key) do nothing;
+
 create unique index if not exists user_profiles_nickname_unique_idx on public.user_profiles(nickname);
 
 create or replace function public.is_admin_user(uid uuid)
@@ -68,6 +80,27 @@ create table if not exists public.works (
 
 alter table public.works add column if not exists grade_score integer;
 alter table public.works add column if not exists grade_reason text;
+
+create table if not exists public.ai_usage_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  work_id uuid references public.works(id) on delete set null,
+  stage text not null,
+  provider text not null default 'siliconflow',
+  model text not null,
+  input_tokens integer not null default 0,
+  output_tokens integer not null default 0,
+  image_count integer not null default 0,
+  text_cost_cny numeric(12,6) not null default 0,
+  image_cost_cny numeric(12,6) not null default 0,
+  total_cost_cny numeric(12,6) not null default 0,
+  metadata jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists ai_usage_logs_created_idx on public.ai_usage_logs(created_at desc);
+create index if not exists ai_usage_logs_user_created_idx on public.ai_usage_logs(user_id, created_at desc);
+create index if not exists ai_usage_logs_stage_created_idx on public.ai_usage_logs(stage, created_at desc);
 
 create table if not exists public.grade_probabilities (
   id text primary key,
@@ -335,6 +368,7 @@ alter table public.message_reads enable row level security;
 alter table public.reward_claims enable row level security;
 alter table public.s_grade_claims enable row level security;
 alter table public.museum_items enable row level security;
+alter table public.ai_usage_logs enable row level security;
 
 drop policy if exists "profiles_select_own" on public.user_profiles;
 create policy "profiles_select_own" on public.user_profiles
@@ -469,6 +503,10 @@ for update to authenticated using (public.is_admin_user(auth.uid())) with check 
 drop policy if exists "museum_delete_admin" on public.museum_items;
 create policy "museum_delete_admin" on public.museum_items
 for delete to authenticated using (public.is_admin_user(auth.uid()));
+
+drop policy if exists "usage_logs_select_admin" on public.ai_usage_logs;
+create policy "usage_logs_select_admin" on public.ai_usage_logs
+for select to authenticated using (public.is_admin_user(auth.uid()));
 
 drop policy if exists "museum_storage_public_read" on storage.objects;
 create policy "museum_storage_public_read" on storage.objects
