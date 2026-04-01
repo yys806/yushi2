@@ -83,6 +83,10 @@ const recommendedCombos = [
 const TEXT_INPUT_PRICE_PER_K = 0.002;
 const TEXT_OUTPUT_PRICE_PER_K = 0.003;
 const IMAGE_PRICE_PER_IMAGE = 0.3;
+const TEXT_CALL_TIMEOUT_MS = 25000;
+const PROMPT_CALL_TIMEOUT_MS = 25000;
+const IMAGE_CALL_TIMEOUT_MS = 40000;
+const IMAGE_MAX_ATTEMPTS = 2;
 
 type UsageInfo = {
   inputTokens: number;
@@ -107,6 +111,26 @@ function calcTextCostCny(inputTokens: number, outputTokens: number) {
   const inputCost = (inputTokens / 1000) * TEXT_INPUT_PRICE_PER_K;
   const outputCost = (outputTokens / 1000) * TEXT_OUTPUT_PRICE_PER_K;
   return Number((inputCost + outputCost).toFixed(6));
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function safeJson(resp: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const data = await resp.json();
+    if (!data || typeof data !== "object") return null;
+    return data as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
 
 function json(data: Json, status = 200) {
@@ -282,27 +306,39 @@ async function callSiliconPromptComposer(
     .filter(Boolean)
     .join("\n");
 
-  const resp = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: "你是高约束生图提示词工程师，只输出JSON，不输出其他内容。" },
-        { role: "user", content: promptTask },
-      ],
-    }),
-  });
+  let resp: Response;
+  try {
+    resp = await fetchWithTimeout(
+      "https://api.siliconflow.cn/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          messages: [
+            { role: "system", content: "你是高约束生图提示词工程师，只输出JSON，不输出其他内容。" },
+            { role: "user", content: promptTask },
+          ],
+        }),
+      },
+      PROMPT_CALL_TIMEOUT_MS
+    );
+  } catch {
+    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt, usage: { inputTokens: 0, outputTokens: 0 } };
+  }
 
   if (!resp.ok) {
     return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt, usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
-  const data = await resp.json();
+  const data = await safeJson(resp);
+  if (!data) {
+    return { prompt: bundle.imagePrompt, negative: bundle.negativePrompt, usage: { inputTokens: 0, outputTokens: 0 } };
+  }
   const content = String(data?.choices?.[0]?.message?.content ?? "{}");
   const parsed = parsePromptJson(content);
   const usage = extractUsage(data?.usage);
@@ -336,21 +372,34 @@ async function callSiliconText(apiKey: string, model: string, promptBrief: strin
     "inspiration 必须 20~40 字；meaning 必须 15~30 字；不要输出多余文本。",
   ].join("\n");
 
-  const resp = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: "你是珠宝玉石设计文案助手，必须遵守字数和JSON格式。" },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.7,
-    }),
-  });
+  let resp: Response;
+  try {
+    resp = await fetchWithTimeout(
+      "https://api.siliconflow.cn/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: "你是珠宝玉石设计文案助手，必须遵守字数和JSON格式。" },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.7,
+        }),
+      },
+      TEXT_CALL_TIMEOUT_MS
+    );
+  } catch {
+    return {
+      inspiration: warning ? `${fallbackInspiration}（${warning}）` : fallbackInspiration,
+      meaning: fallbackMeaning,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    };
+  }
 
   if (!resp.ok) {
     return {
@@ -360,7 +409,14 @@ async function callSiliconText(apiKey: string, model: string, promptBrief: strin
     };
   }
 
-  const data = await resp.json();
+  const data = await safeJson(resp);
+  if (!data) {
+    return {
+      inspiration: warning ? `${fallbackInspiration}（${warning}）` : fallbackInspiration,
+      meaning: fallbackMeaning,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    };
+  }
   const content = String(data?.choices?.[0]?.message?.content ?? "{}");
   const parsed = parseTextJson(content);
   const usage = extractUsage(data?.usage);
@@ -385,26 +441,43 @@ async function callSiliconImage(apiKey: string, model: string, prompt: string, n
   if (!apiKey) return { imageUrl: "https://picsum.photos/768/1024", imageCount: 0 };
 
   const finalPrompt = [prompt, `Negative constraints: ${negativePrompt}`].filter(Boolean).join(". ");
+  for (let attempt = 0; attempt < IMAGE_MAX_ATTEMPTS; attempt += 1) {
+    let resp: Response;
+    try {
+      resp = await fetchWithTimeout(
+        "https://api.siliconflow.cn/v1/images/generations",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model,
+            prompt: finalPrompt,
+            size: "1024x1024",
+          }),
+        },
+        IMAGE_CALL_TIMEOUT_MS
+      );
+    } catch {
+      continue;
+    }
 
-  const resp = await fetch("https://api.siliconflow.cn/v1/images/generations", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      prompt: finalPrompt,
-      size: "1024x1024",
-    }),
-  });
+    if (!resp.ok) continue;
+    const data = await safeJson(resp);
+    if (!data) continue;
+    const rawData = data["data"];
+    if (!Array.isArray(rawData) || rawData.length === 0) continue;
+    const first = rawData[0];
+    if (!first || typeof first !== "object") continue;
+    const imageUrl = String((first as { url?: unknown }).url ?? "").trim();
+    if (imageUrl) {
+      return { imageUrl, imageCount: 1 };
+    }
+  }
 
-  if (!resp.ok) return { imageUrl: "https://picsum.photos/768/1024", imageCount: 0 };
-  const data = await resp.json();
-  return {
-    imageUrl: String(data?.data?.[0]?.url ?? "https://picsum.photos/768/1024"),
-    imageCount: 1,
-  };
+  return { imageUrl: "https://picsum.photos/768/1024", imageCount: 0 };
 }
 
 Deno.serve(async (req) => {

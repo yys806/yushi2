@@ -1,0 +1,5 @@
+[functions.generate-work]
+verify_jwt = false
+
+[functions.rate-work]
+verify_jwt = false

@@ -4,6 +4,7 @@ type Json = Record<string, unknown>;
 
 const TEXT_INPUT_PRICE_PER_K = 0.002;
 const TEXT_OUTPUT_PRICE_PER_K = 0.003;
+const TEXT_CALL_TIMEOUT_MS = 25000;
 
 type UsageInfo = {
   inputTokens: number;
@@ -28,6 +29,26 @@ function calcTextCostCny(inputTokens: number, outputTokens: number) {
   const inputCost = (inputTokens / 1000) * TEXT_INPUT_PRICE_PER_K;
   const outputCost = (outputTokens / 1000) * TEXT_OUTPUT_PRICE_PER_K;
   return Number((inputCost + outputCost).toFixed(6));
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function safeJson(resp: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const data = await resp.json();
+    if (!data || typeof data !== "object") return null;
+    return data as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
 
 function json(data: Json, status = 200) {
@@ -67,37 +88,49 @@ async function callAiReason(apiKey: string, model: string, prompt: string) {
     return { reason: "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。", usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
-  const resp = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: "你是玉石设计评审专家。请仅输出一句中文评语，不要分点。",
+  let resp: Response;
+  try {
+    resp = await fetchWithTimeout(
+      "https://api.siliconflow.cn/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
         },
-        {
-          role: "user",
-          content: [
-            "请根据以下作品信息给出一句12-40字的中文评语。",
-            prompt,
-            "不要输出分数、不要输出等级。",
-          ].join("\n"),
-        },
-      ],
-      temperature: 0.5,
-    }),
-  });
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content: "你是玉石设计评审专家。请仅输出一句中文评语，不要分点。",
+            },
+            {
+              role: "user",
+              content: [
+                "请根据以下作品信息给出一句12-40字的中文评语。",
+                prompt,
+                "不要输出分数、不要输出等级。",
+              ].join("\n"),
+            },
+          ],
+          temperature: 0.5,
+        }),
+      },
+      TEXT_CALL_TIMEOUT_MS
+    );
+  } catch {
+    return { reason: "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。", usage: { inputTokens: 0, outputTokens: 0 } };
+  }
 
   if (!resp.ok) {
     return { reason: "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。", usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
-  const data = await resp.json();
+  const data = await safeJson(resp);
+  if (!data) {
+    return { reason: "器型与纹饰呼应得当，整体观感稳重且有文化意蕴。", usage: { inputTokens: 0, outputTokens: 0 } };
+  }
   return {
     reason: normalizeReason(data?.choices?.[0]?.message?.content),
     usage: extractUsage(data?.usage),
