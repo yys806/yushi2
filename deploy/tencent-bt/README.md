@@ -2,7 +2,7 @@
 
 Your current server status (confirmed):
 
-- `http://101.35.157.169/` returns `200` (Nginx available)
+- `http://<你的服务器IP>/` returns `200` (Nginx available)
 - `:8080` is occupied
 - `:5678` is occupied
 - `:8000` is not externally reachable
