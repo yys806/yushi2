@@ -36,3 +36,10 @@ android/.idea/
 
 # Supabase local temp metadata
 supabase/.temp/
+
+# Android 安装包(体积大,不入库)
+*.apk
+
+# 本地工具临时目录
+.tmp/
+.sisyphus/
